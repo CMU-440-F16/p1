@@ -114,16 +114,16 @@ func (c *UDPConn) write(b []byte, addr *UDPAddr) (int, error) {
 		log.Printf("This should never be reached")
 	}
 
-	if (msg.Type == 1) {
-		shorten  := sometimes(int(atomic.LoadUint32(&msgShorteningPercent)))
+	if msg.Type == 1 {
+		shorten := sometimes(int(atomic.LoadUint32(&msgShorteningPercent)))
 		lengthen := sometimes(int(atomic.LoadUint32(&msgLengtheningPercent)))
 
 		if shorten {
 			var payload int
 			err = json.Unmarshal(msg.Payload, &payload)
 			if err != nil {
-				shorterPayload, _ := json.Marshal(payload/1000)
-				msg.Payload = shorterPayload;
+				shorterPayload, _ := json.Marshal(payload / 1000)
+				msg.Payload = shorterPayload
 			} else {
 				msg.Payload = msg.Payload[:len(msg.Payload)/2]
 			}
@@ -131,14 +131,14 @@ func (c *UDPConn) write(b []byte, addr *UDPAddr) (int, error) {
 			var payload int
 			err = json.Unmarshal(msg.Payload, &payload)
 			if err != nil {
-				longerPayload, _ := json.Marshal(payload*1000)
-				msg.Payload = longerPayload;
+				longerPayload, _ := json.Marshal(payload * 1000)
+				msg.Payload = longerPayload
 			} else {
-				msg.Payload = append(msg.Payload, 2,3,4)
+				msg.Payload = append(msg.Payload, 2, 3, 4)
 			}
 		}
 
-		if (shorten || lengthen) {
+		if shorten || lengthen {
 			b, _ = json.Marshal(msg)
 		}
 	}

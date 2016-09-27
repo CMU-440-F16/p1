@@ -29,7 +29,7 @@ func (ts *testSystem) serverTryRead(size int, expectedData []byte) {
 			return
 		}
 
-		switch (size) {
+		switch size {
 		case SHORT:
 			ts.t.Fatalf("Server received short message: %s", data)
 			return
@@ -37,13 +37,13 @@ func (ts *testSystem) serverTryRead(size int, expectedData []byte) {
 			ts.exitChan <- q
 			if len(data) != len(expectedData) {
 				ts.t.Fatalf("Expecting data %s, server received longer message: %s",
-							expectedData, data)
+					expectedData, data)
 			}
 		case NORMAL:
 			ts.exitChan <- q
 			if !bytes.Equal(data, expectedData) {
 				ts.t.Fatalf("Expecting %s, server received message: %s",
-							expectedData, data)
+					expectedData, data)
 			}
 			return
 		}
@@ -61,7 +61,7 @@ func (ts *testSystem) clientTryRead(size int, expectedData []byte) {
 			return
 		}
 
-		switch (size) {
+		switch size {
 		case SHORT:
 			ts.t.Fatalf("Server received short message!")
 			return
@@ -69,14 +69,14 @@ func (ts *testSystem) clientTryRead(size int, expectedData []byte) {
 			ts.exitChan <- q
 			if len(data) != len(expectedData) {
 				ts.t.Fatalf("Expecting shorter data %s, client received longer message: %s",
-							expectedData, data)
+					expectedData, data)
 			}
 			return
 		case NORMAL:
 			ts.exitChan <- q
 			if !bytes.Equal(data, expectedData) {
 				ts.t.Fatalf("Expecting %s, client received message: %s",
-							expectedData, data)
+					expectedData, data)
 			}
 			return
 		}
@@ -106,7 +106,7 @@ func (ts *testSystem) clientSend(data []byte) {
 
 func (ts *testSystem) testServerWithVariableLengthMsg(timeout int) {
 	fmt.Printf("=== %s (1 clients, 1 msgs/client, %d%% drop rate, %d window size)\n",
-			   ts.desc, ts.dropPercent, ts.params.WindowSize)
+		ts.desc, ts.dropPercent, ts.params.WindowSize)
 	data := randData()
 
 	// First, verify that server can read normal length message
@@ -149,7 +149,7 @@ func (ts *testSystem) testServerWithVariableLengthMsg(timeout int) {
 
 func (ts *testSystem) testClientWithVariableLengthMsg(timeout int) {
 	fmt.Printf("=== %s (1 clients, 1 msgs/client, %d%% drop rate, %d window size)\n",
-			   ts.desc, ts.dropPercent, ts.params.WindowSize)
+		ts.desc, ts.dropPercent, ts.params.WindowSize)
 	data := randData()
 
 	// First, verify that client can read normal length message

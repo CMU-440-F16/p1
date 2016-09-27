@@ -30,8 +30,8 @@ func main() {
 
 	defer client.Close()
 
-	_ = message    // Keep compiler happy. Please remove!
-	_ = maxNonce   // Keep compiler happy. Please remove!
+	_ = message  // Keep compiler happy. Please remove!
+	_ = maxNonce // Keep compiler happy. Please remove!
 	// TODO: implement this!
 
 	printResult(0, 0)
