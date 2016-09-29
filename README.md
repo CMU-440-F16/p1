@@ -53,7 +53,8 @@ Usage of bin/srunner:
 We have also provided pre-compiled executables for you to use called `srunner-sols` and `crunner-sols`.
 These binaries were compiled against our reference LSP implementation,
 so you might find them useful in the early stages of the development process (for example, if you wanted to test your
-`Client` implementation but haven’t finished implementing the `Server` yet, etc.).
+`Client` implementation but haven’t finished implementing the `Server` yet, etc.).Two separate binaries
+are provided for Linux and Mac OS X machines (Windows is not supported at this time).
 
 As an example, to start an echo server on port `6060` on an AFS cluster machine, execute the following command:
 
