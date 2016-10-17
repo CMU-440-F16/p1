@@ -138,8 +138,46 @@ $GOPATH/bin/miner localhost:6060
 $GOPATH/bin/client localhost:6060 bradfitz 9999
 ```
 
-Note that you will need to use the `os.Args` variable in your code to access the user-specified
-command line arguments.
+Note that you will need to use the `os.Args` variable in your code to access the user-specified command line arguments.
+
+### Running the tests
+
+Unlike in previous projects, the tests for part B will _not_ be open source. Instead, we have
+provided two binaries&mdash;`ctest` and `mtest`&mdash;for you to use to test your code. On Autolab, we will be testing you using these two binaries along with an additional `stest` binary.
+
+To execute the tests, make sure your `GOPATH` is properly set and then execute them as follows (note
+that you for each binary, you can activate verbose-mode by specifying the `-v` flag). _Make sure you
+compile your `client`, `miner`, and `server` programs using `go install` before running the tests!_
+
+```bash
+# Run ctest on a Linux machine in non-verbose mode.
+$GOPATH/src/github.com/cmu440/bitcoin/tests/ctest
+```
+
+When you run the tests, one of the first things you'll probably notice is that none of the logs
+you print in both the code you write for part A and part B will not appear. This is because
+our test binaries must capture the output of your programs in order to test that your request clients
+print the correct result message to standard output at the end of each test. An alternative to
+logging messages to standard output is to use a `log.Logger` and direct them to a file instead, as
+illustrated by the code below:
+
+```go
+const (
+    name = "log.txt"
+    flag = os.O_RDWR | os.O_CREATE
+    perm = os.FileMode(0666)
+)
+
+file, err := os.OpenFile(name, flag, perm)
+if err != nil {
+    return
+}
+
+LOGF := log.New(file, "", log.Lshortfile|log.Lmicroseconds)
+LOGF.Println("Bees?!", "Beads.", "Gob's not on board.")
+```
+
+Don't forget to call `file.Close()` when you are done using it!
 
 ### Submitting to Autolab
 
