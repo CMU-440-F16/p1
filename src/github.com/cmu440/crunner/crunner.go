@@ -9,8 +9,8 @@ import (
 	"log"
 	"strconv"
 
-	"github.com/cmu440/lsp"
-	"github.com/cmu440/lspnet"
+	"p1/src/github.com/cmu440/lspnet"
+	"p1/src/github.com/cmu440/lsp"
 )
 
 var (
