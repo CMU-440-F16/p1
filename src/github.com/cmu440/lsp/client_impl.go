@@ -2,10 +2,19 @@
 
 package lsp
 
-import "errors"
+import (
+	"p1/src/github.com/cmu440/lspnet"
+
+	"encoding/json"
+
+	"fmt"
+)
 
 type client struct {
-	// TODO: implement this!
+	debugMode bool
+	connId    int
+	udpConn   *lspnet.UDPConn
+	seqNumber int
 }
 
 // NewClient creates, initiates, and returns a new client. This function
@@ -19,23 +28,113 @@ type client struct {
 // hostport is a colon-separated string identifying the server's host address
 // and port number (i.e., "localhost:9999").
 func NewClient(hostport string, params *Params) (Client, error) {
-	return nil, errors.New("not yet implemented")
+	udpAddr, err := lspnet.ResolveUDPAddr("udp", hostport)
+	if err != nil {
+		return nil, err
+	}
+
+	udpConn, err := lspnet.DialUDP("udp", nil, udpAddr)
+	if err != nil {
+		return nil, err
+	}
+
+	client := client{debugMode: false, seqNumber: 0, udpConn: udpConn}
+	if client.debugMode {
+		fmt.Println("conn ok")
+	}
+
+	connMessage := NewConnect()
+	connByteMessage, _ := json.Marshal(connMessage)
+	client.ConnectWrite(connByteMessage)
+	if client.debugMode {
+		fmt.Println("conn message write")
+	}
+	ackMessage, err := client.Read()
+	if client.debugMode {
+		fmt.Println("conn ack received")
+	}
+	if err != nil {
+		// TODO 超时处理
+	}
+	var ack Message
+	json.Unmarshal(ackMessage, &ack)
+
+	client.connId = ack.ConnID
+	client.seqNumber++
+
+	return &client, nil
 }
 
 func (c *client) ConnID() int {
-	return -1
+	return c.connId
 }
 
 func (c *client) Read() ([]byte, error) {
-	// TODO: remove this line when you are ready to begin implementing this method.
-	select {} // Blocks indefinitely.
-	return nil, errors.New("not yet implemented")
+Here:
+	buffer := make([]byte, MAX_MESSAGE_SIZE)
+
+	len, err := c.udpConn.Read(buffer)
+	if err != nil {
+
+	}
+	if c.debugMode {
+		fmt.Println("readLen:", len)
+	}
+
+	buffer = buffer[:len]
+	var message Message
+	json.Unmarshal(buffer, &message)
+	if c.debugMode {
+		fmt.Println("received message:!!!!!", message)
+	}
+	// 判断是ACK还是普通的Message
+
+	if message.Type == MsgData {
+		if c.debugMode {
+			fmt.Println("plain message")
+			fmt.Println("plain message size", message.Size)
+		}
+		ack, _ := json.Marshal(NewAck(message.ConnID, message.SeqNum))
+		ACKWrite(c.udpConn, nil, ack)
+		return message.Payload, nil
+	}
+
+	if message.Type == MsgAck && message.SeqNum == 0 { // Conn的ACK 必须返回
+		if c.debugMode {
+			fmt.Println("conn ack message")
+		}
+		// 对于conn的ACK 将其返回交给上层unmarshal处理
+		return buffer[:len], nil
+	}
+	if c.debugMode {
+		fmt.Println("message ack received")
+	}
+	// 普通的messgae ACK消息
+	c.seqNumber = message.SeqNum + 1
+
+	goto Here
 }
 
 func (c *client) Write(payload []byte) error {
-	return errors.New("not yet implemented")
+	// 由于此处的payload只是数据信息，需要封装包头
+	dataMessage, _ := json.Marshal(NewData(c.connId, c.seqNumber, len(payload), payload))
+	if c.debugMode {
+		fmt.Println("message send:", string(payload))
+	}
+
+	_, err := c.udpConn.Write(dataMessage)
+	return err
+}
+
+// 由于Write方法发送的是data message的payload
+// 此处为了方便起见，将connect和Write分开，此处的connectMessage为Message类型marshal之后的结果
+func (c *client) ConnectWrite(connectMessage []byte) {
+	c.udpConn.Write(connectMessage)
 }
 
 func (c *client) Close() error {
-	return errors.New("not yet implemented")
+	if c.debugMode {
+		fmt.Println("client close")
+	}
+	return c.udpConn.Close()
 }

@@ -2,10 +2,31 @@
 
 package lsp
 
-import "errors"
+import (
+	"errors"
+
+	"p1/src/github.com/cmu440/lspnet"
+
+	"strconv"
+
+	"encoding/json"
+	"fmt"
+)
 
 type server struct {
-	// TODO: implement this!
+	debugMode                bool
+	udpConn                  *lspnet.UDPConn
+	clients                  map[int]*clientProxy // connID - client 的map
+	nextConnID               int
+	addrMap                  map[string]int // 判断重复的conn消息 使用addr(ip + port)区别，用于处理重复的conn消息
+	serverMessageChannel     chan *Message
+	clientConnMessageChannel chan *lspnet.UDPAddr // 由于conn消息都是(conn,0,0)，此处采用发送UDPAddr区分
+	clientAckMessageChannel  chan *Message
+}
+
+type clientProxy struct {
+	clientAddr *lspnet.UDPAddr
+	seqNumber  int
 }
 
 // NewServer creates, initiates, and returns a new server. This function should
@@ -15,17 +36,106 @@ type server struct {
 // project 0, etc.) and immediately return. It should return a non-nil error if
 // there was an error resolving or listening on the specified port number.
 func NewServer(port int, params *Params) (Server, error) {
-	return nil, errors.New("not yet implemented")
+	udpAddr, err := lspnet.ResolveUDPAddr("udp", ":"+strconv.Itoa(port))
+	if err != nil {
+		return nil, err
+	}
+
+	conn, err := lspnet.ListenUDP("udp", udpAddr)
+	if err != nil {
+		return nil, err
+	}
+	server := &server{false, conn, make(map[int]*clientProxy), 1, make(map[string]int), make(chan *Message), make(chan *lspnet.UDPAddr), make(chan *Message)}
+	go server.ReadRoutine()
+	go server.mainRoutine()
+	return server, nil
 }
 
+func (s *server) mainRoutine() {
+	for {
+		select {
+		case udpAddr := <-s.clientConnMessageChannel:
+			connID, existed := s.addrMap[udpAddr.String()]
+			if existed {
+				// 已经存在了addr对应的connection
+				// 重发(ack,connID,0)
+				ackMessage, _ := json.Marshal(NewAck(connID, 0))
+				ACKWrite(s.udpConn, udpAddr, ackMessage)
+			} else {
+				ackMessage, _ := json.Marshal(NewAck(s.nextConnID, 0))
+				if s.debugMode {
+					fmt.Println("server conn ack:", ackMessage)
+				}
+				s.clients[s.nextConnID] = &clientProxy{seqNumber: 1, clientAddr: udpAddr}
+				s.addrMap[udpAddr.String()] = s.nextConnID
+				s.nextConnID++
+				ACKWrite(s.udpConn, udpAddr, ackMessage)
+			}
+		case ackMessage := <-s.clientAckMessageChannel:
+			proxy, existed := s.clients[ackMessage.ConnID]
+			if existed {
+				proxy.seqNumber = ackMessage.SeqNum + 1
+			}
+
+		}
+	}
+}
+
+// 由于udp无连接，采用一个readRoutine读取所有的client Message
+// 包括conn ack data
+func (s *server) ReadRoutine() {
+	for {
+
+		select {
+		default:
+			buffer := make([]byte, MAX_MESSAGE_SIZE)
+			n, addr, _ := s.udpConn.ReadFromUDP(buffer)
+			if s.debugMode {
+				fmt.Println("server received message")
+			}
+
+			buffer = buffer[:n]
+
+			var message Message
+
+			json.Unmarshal(buffer, &message)
+
+			switch message.Type {
+			case MsgData: // 回ack并返回connID, payload
+
+				ackMessage, _ := json.Marshal(NewAck(message.ConnID, message.SeqNum))
+				ACKWrite(s.udpConn, addr, ackMessage)
+				s.serverMessageChannel <- &message
+			case MsgAck: // 修改对应client的seqNumber
+
+				s.clientAckMessageChannel <- &message
+			case MsgConnect:
+				s.clientConnMessageChannel <- addr
+
+			}
+		}
+	}
+}
+
+// 由于server的read方法可能由上层调用，因为serverMessageChannel从mainRoutine剥离
 func (s *server) Read() (int, []byte, error) {
-	// TODO: remove this line when you are ready to begin implementing this method.
-	select {} // Blocks indefinitely.
-	return -1, nil, errors.New("not yet implemented")
+	dataMessage := <-s.serverMessageChannel
+
+	return dataMessage.ConnID, dataMessage.Payload, nil
 }
 
+// 由于Write只是写date Message的payload
+// server的ack部分由common.go的AckWrite完成
 func (s *server) Write(connID int, payload []byte) error {
-	return errors.New("not yet implemented")
+	client, ok := s.clients[connID]
+	if !ok {
+		return errors.New("client does not exist, connection may be lost or never established")
+	}
+
+	dataMessage, _ := json.Marshal(NewData(connID, client.seqNumber, len(payload), payload))
+	_, e := s.udpConn.WriteToUDP(dataMessage, client.clientAddr)
+
+	return e
 }
 
 func (s *server) CloseConn(connID int) error {
