@@ -14,14 +14,15 @@ import (
 )
 
 type server struct {
-	debugMode                bool
-	udpConn                  *lspnet.UDPConn
-	clients                  map[int]*clientProxy // connID - client 的map
-	nextConnID               int
-	addrMap                  map[string]int // 判断重复的conn消息 使用addr(ip + port)区别，用于处理重复的conn消息
-	serverMessageChannel     chan *Message
-	clientConnMessageChannel chan *lspnet.UDPAddr // 由于conn消息都是(conn,0,0)，此处采用发送UDPAddr区分
-	clientAckMessageChannel  chan *Message
+	debugMode                 bool
+	udpConn                   *lspnet.UDPConn
+	clients                   map[int]*clientProxy // connID - client 的map
+	nextConnID                int
+	addrMap                   map[string]int // 判断重复的conn消息 使用addr(ip + port)区别，用于处理重复的conn消息
+	serverReadMessageChannel  chan *Message
+	clientConnMessageChannel  chan *lspnet.UDPAddr // 由于conn消息都是(conn,0,0)，此处采用发送UDPAddr区分
+	clientAckMessageChannel   chan *Message
+	serverWriteMessageChannel chan *Message // 如果同时write和read都修改sequence Number的话会出现race condition
 }
 
 type clientProxy struct {
@@ -45,7 +46,7 @@ func NewServer(port int, params *Params) (Server, error) {
 	if err != nil {
 		return nil, err
 	}
-	server := &server{false, conn, make(map[int]*clientProxy), 1, make(map[string]int), make(chan *Message), make(chan *lspnet.UDPAddr), make(chan *Message)}
+	server := &server{false, conn, make(map[int]*clientProxy), 1, make(map[string]int), make(chan *Message), make(chan *lspnet.UDPAddr), make(chan *Message), make(chan *Message)}
 	go server.ReadRoutine()
 	go server.mainRoutine()
 	return server, nil
@@ -76,7 +77,12 @@ func (s *server) mainRoutine() {
 			if existed {
 				proxy.seqNumber = ackMessage.SeqNum + 1
 			}
-
+		// 防止write和read的时候seqNumber的读写竞争，所以此处将read和write都放到mainRoutine处理
+		case dataMessage := <-s.serverWriteMessageChannel:
+			client := s.clients[dataMessage.ConnID]
+			dataMessage.SeqNum = client.seqNumber
+			messageSend, _ := json.Marshal(dataMessage)
+			s.udpConn.WriteToUDP(messageSend, client.clientAddr)
 		}
 	}
 }
@@ -85,7 +91,6 @@ func (s *server) mainRoutine() {
 // 包括conn ack data
 func (s *server) ReadRoutine() {
 	for {
-
 		select {
 		default:
 			buffer := make([]byte, MAX_MESSAGE_SIZE)
@@ -105,7 +110,7 @@ func (s *server) ReadRoutine() {
 
 				ackMessage, _ := json.Marshal(NewAck(message.ConnID, message.SeqNum))
 				ACKWrite(s.udpConn, addr, ackMessage)
-				s.serverMessageChannel <- &message
+				s.serverReadMessageChannel <- &message
 			case MsgAck: // 修改对应client的seqNumber
 
 				s.clientAckMessageChannel <- &message
@@ -119,7 +124,7 @@ func (s *server) ReadRoutine() {
 
 // 由于server的read方法可能由上层调用，因为serverMessageChannel从mainRoutine剥离
 func (s *server) Read() (int, []byte, error) {
-	dataMessage := <-s.serverMessageChannel
+	dataMessage := <-s.serverReadMessageChannel
 
 	return dataMessage.ConnID, dataMessage.Payload, nil
 }
@@ -127,15 +132,16 @@ func (s *server) Read() (int, []byte, error) {
 // 由于Write只是写date Message的payload
 // server的ack部分由common.go的AckWrite完成
 func (s *server) Write(connID int, payload []byte) error {
-	client, ok := s.clients[connID]
+	_, ok := s.clients[connID]
 	if !ok {
 		return errors.New("client does not exist, connection may be lost or never established")
 	}
 
-	dataMessage, _ := json.Marshal(NewData(connID, client.seqNumber, len(payload), payload))
-	_, e := s.udpConn.WriteToUDP(dataMessage, client.clientAddr)
+	s.serverWriteMessageChannel <- NewData(connID, 0, len(payload), payload)
+	/*	dataMessage, _ := json.Marshal(NewData(connID, client.seqNumber, len(payload), payload))
+		_, e := s.udpConn.WriteToUDP(dataMessage, client.clientAddr)*/
 
-	return e
+	return nil
 }
 
 func (s *server) CloseConn(connID int) error {

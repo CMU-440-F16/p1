@@ -40,18 +40,18 @@ func NewClient(hostport string, params *Params) (Client, error) {
 
 	client := client{debugMode: false, seqNumber: 0, udpConn: udpConn}
 	if client.debugMode {
-		fmt.Println("conn ok")
+		fmt.Println("real udp conn ok")
 	}
 
 	connMessage := NewConnect()
 	connByteMessage, _ := json.Marshal(connMessage)
 	client.ConnectWrite(connByteMessage)
 	if client.debugMode {
-		fmt.Println("conn message write")
+		fmt.Println("lsp conn message send")
 	}
 	ackMessage, err := client.Read()
 	if client.debugMode {
-		fmt.Println("conn ack received")
+		fmt.Println("lsp conn ack received")
 	}
 	if err != nil {
 		// TODO 超时处理
@@ -78,18 +78,18 @@ Here:
 
 	}
 	if c.debugMode {
-		fmt.Println("readLen:", len)
+		fmt.Println("client readLen:", len)
 	}
 
 	buffer = buffer[:len]
 	var message Message
 	json.Unmarshal(buffer, &message)
 	if c.debugMode {
-		fmt.Println("received message:!!!!!", message)
+		fmt.Println("received message:", message)
 	}
-	// 判断是ACK还是普通的Message
-
-	if message.Type == MsgData {
+	// 判断是ACK还是普通的Message(client 不会收到connMessage)
+	switch message.Type {
+	case MsgData:
 		if c.debugMode {
 			fmt.Println("plain message")
 			fmt.Println("plain message size", message.Size)
@@ -97,22 +97,24 @@ Here:
 		ack, _ := json.Marshal(NewAck(message.ConnID, message.SeqNum))
 		ACKWrite(c.udpConn, nil, ack)
 		return message.Payload, nil
-	}
-
-	if message.Type == MsgAck && message.SeqNum == 0 { // Conn的ACK 必须返回
-		if c.debugMode {
-			fmt.Println("conn ack message")
+	case MsgAck:
+		if message.SeqNum == 0 {
+			if c.debugMode {
+				fmt.Println("conn ack message received")
+			}
+			// 对于conn的ACK 将其返回交给上层unmarshal处理
+			return buffer[:len], nil
+		} else {
+			if c.debugMode {
+				fmt.Println("message ack received")
+			}
+			c.seqNumber = message.SeqNum + 1
+			goto Here
 		}
-		// 对于conn的ACK 将其返回交给上层unmarshal处理
-		return buffer[:len], nil
+	default:
+		goto Here
 	}
-	if c.debugMode {
-		fmt.Println("message ack received")
-	}
-	// 普通的messgae ACK消息
-	c.seqNumber = message.SeqNum + 1
 
-	goto Here
 }
 
 func (c *client) Write(payload []byte) error {
