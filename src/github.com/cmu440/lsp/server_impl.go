@@ -18,11 +18,11 @@ type server struct {
 	udpConn                   *lspnet.UDPConn
 	clients                   map[int]*clientProxy // connID - client 的map
 	nextConnID                int
-	addrMap                   map[string]int // 判断重复的conn消息 使用addr(ip + port)区别，用于处理重复的conn消息
-	serverReadMessageChannel  chan *Message
-	clientConnMessageChannel  chan *lspnet.UDPAddr // 由于conn消息都是(conn,0,0)，此处采用发送UDPAddr区分
-	clientAckMessageChannel   chan *Message
-	serverWriteMessageChannel chan *Message // 如果同时write和read都修改sequence Number的话会出现race condition
+	addrMap                   map[string]int       // 判断重复的conn消息 使用addr(ip + port)区别，用于处理重复的conn消息
+	serverReadMessageChannel  chan *Message        // 用于read方法
+	serverConnMessageChannel  chan *lspnet.UDPAddr // 由于conn消息都是(conn,0,0)，此处采用发送UDPAddr区分
+	serverAckMessageChannel   chan *Message        // 用于main routine的处理
+	serverWriteMessageChannel chan *Message        // 如果同时write和read都修改sequence Number的话会出现race condition
 }
 
 type clientProxy struct {
@@ -55,7 +55,7 @@ func NewServer(port int, params *Params) (Server, error) {
 func (s *server) mainRoutine() {
 	for {
 		select {
-		case udpAddr := <-s.clientConnMessageChannel:
+		case udpAddr := <-s.serverConnMessageChannel:
 			connID, existed := s.addrMap[udpAddr.String()]
 			if existed {
 				// 已经存在了addr对应的connection
@@ -70,18 +70,22 @@ func (s *server) mainRoutine() {
 				s.clients[s.nextConnID] = &clientProxy{seqNumber: 1, clientAddr: udpAddr}
 				s.addrMap[udpAddr.String()] = s.nextConnID
 				s.nextConnID++
+				// 由于不能routine内部的channel互相发送，此处的ack直接写(发送到serverWrite会死锁)
 				ACKWrite(s.udpConn, udpAddr, ackMessage)
 			}
-		case ackMessage := <-s.clientAckMessageChannel:
-			proxy, existed := s.clients[ackMessage.ConnID]
+		case ackMessage := <-s.serverAckMessageChannel:
+			client, existed := s.clients[ackMessage.ConnID]
 			if existed {
-				proxy.seqNumber = ackMessage.SeqNum + 1
+				client.seqNumber = ackMessage.SeqNum + 1
 			}
 		// 防止write和read的时候seqNumber的读写竞争，所以此处将read和write都放到mainRoutine处理
-		case dataMessage := <-s.serverWriteMessageChannel:
-			client := s.clients[dataMessage.ConnID]
-			dataMessage.SeqNum = client.seqNumber
-			messageSend, _ := json.Marshal(dataMessage)
+		case message := <-s.serverWriteMessageChannel:
+			client := s.clients[message.ConnID]
+			// 此时dataMessage的seqNum需要根据server维护的proxy的seqNum确定
+			if message.Type == MsgData {
+				message.SeqNum = client.seqNumber
+			}
+			messageSend, _ := json.Marshal(message)
 			s.udpConn.WriteToUDP(messageSend, client.clientAddr)
 		}
 	}
@@ -106,16 +110,19 @@ func (s *server) ReadRoutine() {
 			json.Unmarshal(buffer, &message)
 
 			switch message.Type {
-			case MsgData: // 回ack并返回connID, payload
+			case MsgData:
 
-				ackMessage, _ := json.Marshal(NewAck(message.ConnID, message.SeqNum))
-				ACKWrite(s.udpConn, addr, ackMessage)
+				ackMessage := NewAck(message.ConnID, message.SeqNum)
+				//ACKWrite(s.udpConn, addr, ackMessage)
+				ackMessage.SeqNum = message.SeqNum
+
+				s.serverWriteMessageChannel <- ackMessage
 				s.serverReadMessageChannel <- &message
 			case MsgAck: // 修改对应client的seqNumber
 
-				s.clientAckMessageChannel <- &message
+				s.serverAckMessageChannel <- &message
 			case MsgConnect:
-				s.clientConnMessageChannel <- addr
+				s.serverConnMessageChannel <- addr
 
 			}
 		}
