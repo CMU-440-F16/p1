@@ -44,6 +44,7 @@ type client struct {
 	clientWriteMessageChannel chan *Message // 如果同时write和read都修改sequence Number的话会出现race condition
 	clientReadRequest         chan int      // client的read请求
 	clientReadResponse        chan *Message // read请求的返回
+	clientWriteResult 	chan int
 
 	connLostGetChannel      chan bool
 	explicitCloseSetChannel chan int
@@ -77,7 +78,7 @@ func NewClient(hostport string, params *Params) (Client, error) {
 
 	client := client{false, 0, udpConn, 0, 0, 0, false, params.EpochLimit, time.NewTicker(time.Millisecond * time.Duration(params.EpochMillis)), params.WindowSize,
 		0, params.WindowSize - 1, 0, 0, false, 0, false, false, list.New(), make(map[int]*Message), make(chan *Message), make(chan *Message), make(chan *Message), make(chan int), make(chan *Message),
-		make(chan bool), make(chan int), make(chan bool), false, make(chan int), make(chan int), make(chan int)}
+		make(chan int), make(chan bool), make(chan int), make(chan bool), false, make(chan int), make(chan int), make(chan int)}
 
 	if client.debugMode {
 		fmt.Println("real udp conn ok")
@@ -95,8 +96,8 @@ func NewClient(hostport string, params *Params) (Client, error) {
 	if client.debugMode {
 		fmt.Println("lsp conn ack received")
 	}
+	// 无法建立连接则返回err
 	if err != nil {
-		client.Close()
 		return nil, errors.New("can't establish conn with " + string(params.EpochLimit) + " time out")
 	} else {
 		client.connId, _ = strconv.Atoi(string(connID))
@@ -163,22 +164,22 @@ func (c *client) mainRoutine() {
 				c.noMsgEpochs = 0
 			}
 
-			if c.noMsgEpochs == c.epochLimit {
+			if c.noMsgEpochs >= c.epochLimit {
 				c.connLost = true
-				c.epochTicker.Stop() // conn丢失后停止ticker定时器
 
+				if c.close { // close阶段发生lost 直接return
+					c.epochTicker.Stop() // 当lost且close之后才Stop定时器
+					c.mainRoutineExitChannel <- 0
+					return
+				}
 				if c.readReq { // connLost之前已经有read请求
 					c.readReq = false
 					c.getPendingMessageAfterLostOrExplicitClose()
 				}
-
-				if c.close { // close阶段发生lost 直接return
-					c.mainRoutineExitChannel <- 0
-					return
-				}
+/*
 				if c.connId == 0 { // 连接阶段5个epoch返回connId为0的数据，抛出err并close
 					c.clientReadResponse <- NewData(0, 0, 0, nil)
-				}
+				}*/
 			} else {
 				// epoch事件
 				// 1、conn无ack的话resend conn request
@@ -349,6 +350,14 @@ func (c *client) mainRoutine() {
 					}
 					// 更新下一个发送的编号
 					c.sendSeqNumber++
+
+					if writeMessage.Type == MsgData {
+						c.clientWriteResult <- 1
+					}
+				}
+			} else {
+				if writeMessage.Type == MsgData {
+					c.clientWriteResult <- 0
 				}
 			}
 
@@ -371,7 +380,7 @@ func (c *client) mainRoutine() {
 					} else { // 此时对应的消息还没有读取到，作标记，当对应的clientReadSeqNumber来的时候再更新
 						c.readReq = true
 					}
-				} else { // conn丢失的话，返回pending return的message(不一定是clientReadSeq的顺序), 没有的话connLostChannel写true
+				} else { // conn丢失的话或者关闭的话，返回pending return的message(不一定是clientReadSeq的顺序), 没有的话connLostChannel写true
 
 					c.getPendingMessageAfterLostOrExplicitClose()
 				}
@@ -382,7 +391,7 @@ func (c *client) mainRoutine() {
 		case <-c.explicitCloseSetChannel:
 			c.explicitClose = true
 
-			if c.close { // close的过程中conn丢失或者是explicitClose
+			if c.close { // close的过程中conn丢失或者是explicitClose 此时直接return
 				c.mainRoutineExitChannel <- 0
 				return
 			}
@@ -432,18 +441,18 @@ func (c *client) Read() ([]byte, error) {
 }
 
 func (c *client) Write(payload []byte) error {
-	c.clientReadRequest <- 1
-	lost := <-c.connLostGetChannel
-	if lost {
-		return errors.New("conn lost: write")
-	} else {
-		if c.debugMode {
-			fmt.Println("message send:", string(payload))
-		}
-		// 由于此处的payload只是数据信息，需要封装包头
-		c.clientWriteMessageChannel <- NewData(c.connId, c.sendSeqNumber, len(payload), payload)
 
+	if c.debugMode {
+		fmt.Println("message send:", string(payload))
+	}
+	// 由于此处的payload只是数据信息，需要封装包头
+	c.clientWriteMessageChannel <- NewData(c.connId, c.sendSeqNumber, len(payload), payload)
+
+	res := <-c.clientWriteResult
+	if res == 1 {
 		return nil
+	} else {
+		return errors.New("conn lost or explicit close: write")
 	}
 
 }
