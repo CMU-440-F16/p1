@@ -2,7 +2,6 @@ package lsp
 
 import (
 	"encoding/json"
-
 )
 
 var MAX_MESSAGE_SIZE = 1000
@@ -13,7 +12,7 @@ func marShalMessage(msg *Message) []byte {
 	return marshaledMsg
 }
 
-func max (x,y int) int {
+func max(x, y int) int {
 	if x >= y {
 		return x
 	} else {
