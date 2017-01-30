@@ -19,3 +19,12 @@ func max(x, y int) int {
 		return y
 	}
 }
+
+func dataMsgSizeVA(dataMsg *Message) bool {
+	if len(dataMsg.Payload) < dataMsg.Size {
+		return false
+	} else {
+		dataMsg.Payload = dataMsg.Payload[:dataMsg.Size]
+		return true
+	}
+}

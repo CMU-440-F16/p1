@@ -45,9 +45,10 @@ type client struct {
 	clientReadResponse        chan *Message // read请求的返回
 	clientWriteResult         chan int
 
-	explicitCloseSetChannel chan int
-	mainRoutineExitChannel  chan int
-	readRoutineExitChannel  chan int
+	explicitCloseSetChannel     chan int
+	mainRoutineReadyExitChannel chan int
+	mainRoutineExitChannel      chan int
+	readRoutineExitChannel      chan int
 }
 
 // NewClient creates, initiates, and returns a new client. This function
@@ -68,12 +69,13 @@ func NewClient(hostport string, params *Params) (Client, error) {
 
 	udpConn, err := lspnet.DialUDP("udp", nil, udpAddr)
 	if err != nil {
+		fmt.Println("cannot conn to server")
 		return nil, err
 	}
 
 	client := client{false, 0, udpConn, 0, 0, 0, false, params.EpochLimit, time.NewTicker(time.Millisecond * time.Duration(params.EpochMillis)), params.WindowSize,
 		0, params.WindowSize - 1, 0, 0, false, 0, false, false, list.New(), make(map[int]*Message), make(chan *Message), make(chan *Message), make(chan *Message), make(chan int), make(chan *Message),
-		make(chan int), make(chan int), make(chan int), make(chan int)}
+		make(chan int), make(chan int), make(chan int), make(chan int), make(chan int)}
 
 	if client.debugMode {
 		fmt.Println("real udp conn ok")
@@ -101,44 +103,46 @@ func NewClient(hostport string, params *Params) (Client, error) {
 }
 
 func (c *client) readRoutine() {
-	var readErr bool
 	for {
 		select {
 		case <-c.readRoutineExitChannel:
+			//fmt.Println("client read routing exit !!!!!!")
 			return
 		default:
-			if !readErr {
-				buffer := make([]byte, MAX_MESSAGE_SIZE)
 
-				len, err := c.udpConn.Read(buffer)
-				if err != nil {
-					if c.debugMode {
-						fmt.Println("readRoutine read err,", err)
-					}
-					readErr = true
-				} else {
-					buffer = buffer[:len]
-					var message Message
-					json.Unmarshal(buffer, &message)
-					if c.debugMode {
-						fmt.Println("client received message:", message)
-					}
-					// 判断是ACK还是普通的Message(client 不会收到connMessage)
-					switch message.Type {
-					case MsgData:
-						if c.debugMode {
-							fmt.Println("plain message")
-							fmt.Println("plain message size", message.Size)
-						}
-						c.clientWriteMessageChannel <- NewAck(c.connId, message.SeqNum)
-						c.clientDataMessageChannel <- &message
+			buffer := make([]byte, MAX_MESSAGE_SIZE)
 
-					case MsgAck:
-						if c.debugMode {
-							fmt.Println("ack message received")
-						}
-						c.clientAckMessageChannel <- &message
+			len, err := c.udpConn.Read(buffer)
+			if err != nil {
+				//fmt.Println("client read err")
+				if c.debugMode {
+					fmt.Println("readRoutine read err,", err)
+				}
+
+			} else {
+				buffer = buffer[:len]
+				var message Message
+				json.Unmarshal(buffer, &message)
+				if c.debugMode {
+					fmt.Println("client received message:", message)
+				}
+				// 判断是ACK还是普通的Message(client 不会收到connMessage)
+				switch message.Type {
+				case MsgData:
+					//fmt.Println("client recv plain message:", message.String())
+					if c.debugMode {
+						fmt.Println("plain message")
+						fmt.Println("plain message size", message.Size)
 					}
+					c.clientWriteMessageChannel <- NewAck(c.connId, message.SeqNum)
+					c.clientDataMessageChannel <- &message
+
+				case MsgAck:
+					//fmt.Println("client recv ack message:", message.String())
+					if c.debugMode {
+						fmt.Println("ack message received")
+					}
+					c.clientAckMessageChannel <- &message
 				}
 			}
 
@@ -150,28 +154,24 @@ func (c *client) mainRoutine() {
 	for {
 		select {
 		case <-c.epochTicker.C:
-			if c.debugMode {
-				fmt.Println("main routine epoch")
-			}
 			if !c.epochReceived {
 				c.noMsgEpochs++
 			} else {
 				c.epochReceived = false
 				c.noMsgEpochs = 0
 			}
-
+			//fmt.Println("client epoch")
+			//fmt.Println(c.noMsgEpochs)
 			if c.noMsgEpochs >= c.epochLimit {
 				c.connLost = true
 
-				if c.readReq { // connLost之前已经有read请求
-					c.readReq = false
-					c.getPendingMessageAfterLostOrExplicitClose()
-				}
-
 				if c.explicitClose { // close阶段发生lost 直接return
 					c.epochTicker.Stop() // 当lost且close之后才Stop定时器
-					c.mainRoutineExitChannel <- 0
-					return
+					//fmt.Println("client with connLost after close, exit")
+					c.mainRoutineReadyExitChannel <- 0
+				} else if c.readReq { // 没有close, 但是connLost之前已经有read请求
+					c.readReq = false
+					c.getPendingMessageAfterLostOrExplicitClose()
 				}
 
 			} else {
@@ -182,6 +182,7 @@ func (c *client) mainRoutine() {
 				// 4、resend未ack的数据
 				if c.connId == 0 {
 					// 情况1 发送Conn，此时肯定没有未ack的dataMsg
+					//fmt.Println("client write conn in epoch")
 					c.udpConn.Write(marShalMessage(NewConnect()))
 				} else { // 发送mostRecentACK以及窗口内发送了但是没有ack的dataMsg
 
@@ -222,9 +223,9 @@ func (c *client) mainRoutine() {
 							if iter.Next() == nil {
 								// 所有消息都被ack了且调用了Close，则退出
 								if c.explicitClose {
-									c.sendBuffer.Remove(iter)
-									c.mainRoutineExitChannel <- 0
-									return
+									//fmt.Println("client finish all ack exit")
+									c.epochTicker.Stop()
+									c.mainRoutineReadyExitChannel <- 0
 								}
 								c.windowStart = c.maxACKSeq + 1
 								c.windowEnd = c.windowSize + c.windowStart - 1
@@ -246,11 +247,15 @@ func (c *client) mainRoutine() {
 								}
 							}
 						}
+						//fmt.Println("client remove send buffer message:", iter.Value.(*Message).String())
 						c.sendBuffer.Remove(iter)
+						//fmt.Println("buffer len:", c.sendBuffer.Len())
+						//c.printBuffer();
 						break
 					}
 				}
-				if ackMessage.SeqNum == 0 {
+				// conn的ack消息(防止重复接受server端发送的conn ack作为上层read的结果)
+				if ackMessage.SeqNum == 0 && c.connId == 0 {
 					if c.debugMode {
 						fmt.Println("conn ack received")
 					}
@@ -275,6 +280,9 @@ func (c *client) mainRoutine() {
 			}
 
 		case dataMessage := <-c.clientDataMessageChannel:
+			if !dataMsgSizeVA(dataMessage) {
+				break
+			}
 			if c.debugMode {
 				fmt.Println("main routine data read")
 			}
@@ -289,7 +297,9 @@ func (c *client) mainRoutine() {
 				}
 				c.mostRecentReceivedSeq = dataMessage.SeqNum
 				if _, ok := c.receiveBuffer[dataMessage.SeqNum]; dataMessage.SeqNum >= c.readSeqNumber && !ok { // 重复的信息(小于client期望接受的seqNumber或者buffer中已经含有)丢弃
-
+					//fmt.Println("client expected msg:" , c.readSeqNumber ,dataMessage.String())
+					// 缓存读取的消息
+					c.receiveBuffer[dataMessage.SeqNum] = dataMessage
 					// 如果是下一个期望的dataMsg seqNumber 则更新readSeqNumber到第一个未接受的
 					if dataMessage.SeqNum == c.readSeqNumber {
 						c.readSeqNumber++
@@ -300,9 +310,8 @@ func (c *client) mainRoutine() {
 						if c.debugMode {
 							fmt.Println("after update, client read seq:", c.readSeqNumber)
 						}
-					} else { // 不是expected的Message就缓存
-						c.receiveBuffer[dataMessage.SeqNum] = dataMessage
 					}
+
 					// 如果和上层期望的一致并且收到了read()请求 则清除cache并向response channel写入dataMsg，更新client下次读取的seqNumber
 					if c.debugMode {
 						fmt.Println(dataMessage.SeqNum, c.clientReadSeqNumber, c.readReq)
@@ -326,23 +335,22 @@ func (c *client) mainRoutine() {
 			if c.debugMode {
 				fmt.Println("main routine write msg:", writeMessage)
 			}
-			if !c.connLost && !c.explicitClose {
+			if !c.connLost {
 				// ack消息直接写
 				if writeMessage.Type == MsgAck {
 					if c.debugMode {
-						fmt.Println("client write ack:", writeMessage.SeqNum)
+						fmt.Println("client write ack:", writeMessage.String())
 					}
 					c.udpConn.Write(marShalMessage(writeMessage))
 				} else { // dataMessage或者Connect需要暂存
-
+					writeMessage.SeqNum = c.sendSeqNumber
+					c.sendSeqNumber++
 					c.sendBuffer.PushBack(writeMessage)
 
 					// 如果在window的范围内则直接写
 					if writeMessage.SeqNum >= c.windowStart && writeMessage.SeqNum <= c.windowEnd {
 						c.udpConn.Write(marShalMessage(writeMessage))
 					}
-					// 更新下一个发送的编号
-					c.sendSeqNumber++
 
 					if writeMessage.Type == MsgData {
 						c.clientWriteResult <- 1
@@ -358,10 +366,11 @@ func (c *client) mainRoutine() {
 			if c.debugMode {
 				fmt.Println("main routine client read req")
 			}
-
-			if !c.connLost && !c.explicitClose {
+			//fmt.Println("client read data msg")
+			if !c.connLost {
 				msg, ok := c.receiveBuffer[c.clientReadSeqNumber]
 				if ok { // 已经有了则直接移除缓存并发送到response channel，更新下一个读取的data seqNumber
+					//fmt.Println("client read data msg existd:", msg.String())
 					delete(c.receiveBuffer, c.clientReadSeqNumber)
 					c.clientReadSeqNumber++
 					if c.debugMode {
@@ -369,26 +378,28 @@ func (c *client) mainRoutine() {
 					}
 					c.clientReadResponse <- msg
 				} else { // 此时对应的消息还没有读取到，作标记，当对应的clientReadSeqNumber来的时候再更新
+					//fmt.Println("client read data msg doesn't existd, tag to true")
 					c.readReq = true
 				}
-			} else if c.explicitClose { // 显示关闭的话直接写入代表err的数据
-				c.clientReadResponse <- NewData(0, 0, 0, nil)
-			} else { // explicit close, 返回pending return的message(不一定是clientReadSeq的顺序), 没有的话connLostChannel写true
+			} else { // conn lost
 				c.getPendingMessageAfterLostOrExplicitClose()
 			}
 
 		case <-c.explicitCloseSetChannel:
 			c.explicitClose = true
 
-			if c.readReq { // explicit close之前收到了read请求
-				c.readReq = false
-				c.clientReadResponse <- NewData(0, 0, 0, nil)
-			}
+			//fmt.Println("client mark close, unack msg size:", c.sendBuffer.Len())
 
-			if c.connLost { // 如果close之前conn已经丢失的话 直接退出
-				c.mainRoutineExitChannel <- 0
-				return
+			if c.sendBuffer.Len() == 0 || c.connLost{ // 说明已经可以退出了
+				c.epochTicker.Stop()
+				//fmt.Println("client with all msg acked before close, exit")
+
+				c.mainRoutineReadyExitChannel <- 0
 			}
+		case <-c.mainRoutineExitChannel:
+			c.epochTicker.Stop()
+			//fmt.Println("main routine exit")
+			return
 		}
 	}
 }
@@ -418,6 +429,8 @@ func (c *client) Read() ([]byte, error) {
 	if dataMessage.ConnID == 0 { // 代表connLost或者explicit Close且没有别的消息了
 		return nil, errors.New("conn lost or explicit close: read")
 	} else {
+		/*fmt.Println("msg return:", dataMessage.String())
+		fmt.Println("nextNumber:", c.clientReadSeqNumber)*/
 		return dataMessage.Payload, nil
 	}
 
@@ -429,7 +442,7 @@ func (c *client) Write(payload []byte) error {
 		fmt.Println("message send:", string(payload))
 	}
 	// 由于此处的payload只是数据信息，需要封装包头
-	c.clientWriteMessageChannel <- NewData(c.connId, c.sendSeqNumber, len(payload), payload)
+	c.clientWriteMessageChannel <- NewData(c.connId, 0, len(payload), payload)
 
 	res := <-c.clientWriteResult
 	if res == 1 {
@@ -450,11 +463,18 @@ func (c *client) Close() error {
 	c.explicitCloseSetChannel <- 0
 
 	// 等待所有消息都send和ack, mainRoutine退出或者由于connLost或者explicitClose直接退出
-	<-c.mainRoutineExitChannel
+	<-c.mainRoutineReadyExitChannel
+	//fmt.Println("client main routine ready exit, write exit msg to read routine")
 
-	// 将readRoutine退出
-	c.readRoutineExitChannel <- 0
-
+	// 首先关闭conn close 防止read routine在udpconn.read()处阻塞
 	c.udpConn.Close()
+
+	c.readRoutineExitChannel <- 0
+	//fmt.Println("client read routine exit")
+
+	c.mainRoutineExitChannel <- 0
+	//fmt.Println("client main routine exit")
+
+
 	return nil
 }
