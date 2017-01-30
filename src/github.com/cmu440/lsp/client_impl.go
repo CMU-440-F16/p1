@@ -5,8 +5,6 @@ package lsp
 import (
 	"p1/src/github.com/cmu440/lspnet"
 
-	"encoding/json"
-
 	"container/list"
 	"errors"
 	"fmt"
@@ -121,8 +119,7 @@ func (c *client) readRoutine() {
 
 			} else {
 				buffer = buffer[:len]
-				var message Message
-				json.Unmarshal(buffer, &message)
+				message := unmarshalMessage(buffer)
 				if c.debugMode {
 					fmt.Println("client received message:", message)
 				}
@@ -183,10 +180,10 @@ func (c *client) mainRoutine() {
 				if c.connId == 0 {
 					// 情况1 发送Conn，此时肯定没有未ack的dataMsg
 					//fmt.Println("client write conn in epoch")
-					c.udpConn.Write(marShalMessage(NewConnect()))
+					c.udpConn.Write(marshalMessage(NewConnect()))
 				} else { // 发送mostRecentACK以及窗口内发送了但是没有ack的dataMsg
 
-					c.udpConn.Write(marShalMessage(NewAck(c.connId, c.mostRecentReceivedSeq)))
+					c.udpConn.Write(marshalMessage(NewAck(c.connId, c.mostRecentReceivedSeq)))
 
 					// 发送所有在sendBuffer [windosStart, windowEnd]中的数据
 					for iter := c.sendBuffer.Front(); iter != nil; iter = iter.Next() {
@@ -196,7 +193,7 @@ func (c *client) mainRoutine() {
 						}
 
 						if dataMsg.SeqNum >= c.windowStart && dataMsg.SeqNum <= c.windowEnd {
-							c.udpConn.Write(marShalMessage(dataMsg))
+							c.udpConn.Write(marshalMessage(dataMsg))
 						}
 
 					}
@@ -241,7 +238,7 @@ func (c *client) mainRoutine() {
 										break
 									}
 									if message.SeqNum > oldEnd && message.SeqNum <= c.windowEnd {
-										c.udpConn.Write(marShalMessage(message))
+										c.udpConn.Write(marshalMessage(message))
 									}
 
 								}
@@ -341,7 +338,7 @@ func (c *client) mainRoutine() {
 					if c.debugMode {
 						fmt.Println("client write ack:", writeMessage.String())
 					}
-					c.udpConn.Write(marShalMessage(writeMessage))
+					c.udpConn.Write(marshalMessage(writeMessage))
 				} else { // dataMessage或者Connect需要暂存
 					writeMessage.SeqNum = c.sendSeqNumber
 					c.sendSeqNumber++
@@ -349,7 +346,7 @@ func (c *client) mainRoutine() {
 
 					// 如果在window的范围内则直接写
 					if writeMessage.SeqNum >= c.windowStart && writeMessage.SeqNum <= c.windowEnd {
-						c.udpConn.Write(marShalMessage(writeMessage))
+						c.udpConn.Write(marshalMessage(writeMessage))
 					}
 
 					if writeMessage.Type == MsgData {
@@ -389,8 +386,7 @@ func (c *client) mainRoutine() {
 			c.explicitClose = true
 
 			//fmt.Println("client mark close, unack msg size:", c.sendBuffer.Len())
-
-			if c.sendBuffer.Len() == 0 || c.connLost{ // 说明已经可以退出了
+			if c.sendBuffer.Len() == 0 || c.connLost { // 说明已经可以退出了
 				c.epochTicker.Stop()
 				//fmt.Println("client with all msg acked before close, exit")
 
@@ -474,7 +470,6 @@ func (c *client) Close() error {
 
 	c.mainRoutineExitChannel <- 0
 	//fmt.Println("client main routine exit")
-
 
 	return nil
 }

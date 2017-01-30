@@ -10,7 +10,6 @@ import (
 	"strconv"
 
 	"container/list"
-	"encoding/json"
 	"fmt"
 	"time"
 )
@@ -98,14 +97,13 @@ func (s *server) mainRoutine() {
 	for {
 		select {
 		case <-s.epochTicker.C: // epoch事件，对server的每一个clientProxy执行
-			//fmt.Println("server epoch")
-			//fmt.Println(len(s.clients))
 			if s.closed && len(s.clients) == 0 {
 				if s.closedSuccess {
 					s.serverCloseResonseChannel <- 1
 				} else {
 					s.serverCloseResonseChannel <- 0
 				}
+				break
 			}
 
 			for i := 1; i < s.nextConnID; i++ { // i为connId
@@ -121,7 +119,6 @@ func (s *server) mainRoutine() {
 					if c.noMsgEpochs >= s.epochLimit {
 
 						c.connLost = true
-						// connLost之后一定移除client
 						// 如果没有close, 则将pending data msg加入s.readBuffer
 						if !c.explicitClose {
 							for size := len(c.receiveBuffer); size > 0; {
@@ -145,10 +142,9 @@ func (s *server) mainRoutine() {
 						// 某个client的connLost之后 删除server端的client
 						delete(s.clients, i)
 					} else {
-
 						// 只有未close或者close之后的data没有全部ack的client才需要发送心跳(可能在全部消息都ack之后调用close时发生)
 						if !c.explicitClose || c.sendBuffer.Len() > 0 {
-							s.udpConn.WriteToUDP(marShalMessage(NewAck(i, c.mostRecentReceivedSeq)), c.clientAddr)
+							s.udpConn.WriteToUDP(marshalMessage(NewAck(i, c.mostRecentReceivedSeq)), c.clientAddr)
 
 							for iter := c.sendBuffer.Front(); iter != nil; iter = iter.Next() {
 								dataMsg := iter.Value.(*Message)
@@ -157,14 +153,13 @@ func (s *server) mainRoutine() {
 								}
 
 								if dataMsg.SeqNum >= c.windowStart && dataMsg.SeqNum <= c.windowEnd {
-									s.udpConn.WriteToUDP(marShalMessage(dataMsg), c.clientAddr)
+									s.udpConn.WriteToUDP(marshalMessage(dataMsg), c.clientAddr)
 								}
 
 							}
 						} else {
 							delete(s.clients, i) // 删除client
 						}
-
 					}
 				}
 			}
@@ -172,13 +167,13 @@ func (s *server) mainRoutine() {
 			if !s.closed {
 				connID, existed := s.addrMap[udpAddr.String()]
 				if existed {
-					s.udpConn.WriteToUDP(marShalMessage(NewAck(connID, 0)), udpAddr)
+					s.udpConn.WriteToUDP(marshalMessage(NewAck(connID, 0)), udpAddr)
 				} else {
 					s.clients[s.nextConnID] = &clientProxy{udpAddr, 1, 1, 1, s.windowSize, 1, s.windowSize, 0, 0, false, 0, false, false, list.New(), make(map[int]*Message)}
 					s.addrMap[udpAddr.String()] = s.nextConnID
 
 					// 由于不能routine内部的channel互相发送，此处的ack直接写(发送到serverWrite会死锁)
-					s.udpConn.WriteToUDP(marShalMessage(NewAck(s.nextConnID, 0)), udpAddr)
+					s.udpConn.WriteToUDP(marshalMessage(NewAck(s.nextConnID, 0)), udpAddr)
 					s.nextConnID++
 				}
 			}
@@ -214,7 +209,7 @@ func (s *server) mainRoutine() {
 										break
 									}
 									if message.SeqNum > oldEnd && message.SeqNum <= c.windowEnd {
-										s.udpConn.WriteToUDP(marShalMessage(message), c.clientAddr)
+										s.udpConn.WriteToUDP(marshalMessage(message), c.clientAddr)
 									}
 
 								}
@@ -277,7 +272,7 @@ func (s *server) mainRoutine() {
 					if s.debugMode {
 						fmt.Println("server write ack message: ", writeMessage)
 					}
-					s.udpConn.WriteToUDP(marShalMessage(writeMessage), c.clientAddr)
+					s.udpConn.WriteToUDP(marshalMessage(writeMessage), c.clientAddr)
 				} else {
 					writeMessage.SeqNum = c.sendSeqNumber
 					// 缓存buffer信息
@@ -289,7 +284,7 @@ func (s *server) mainRoutine() {
 						if s.debugMode {
 							fmt.Println("server write data message: ", writeMessage, c.clientAddr)
 						}
-						s.udpConn.WriteToUDP(marShalMessage(writeMessage), c.clientAddr)
+						s.udpConn.WriteToUDP(marshalMessage(writeMessage), c.clientAddr)
 					}
 					// 更新下一个发送的编号
 					c.sendSeqNumber++
@@ -305,8 +300,8 @@ func (s *server) mainRoutine() {
 		case connID := <-s.serverCloseClientChannel:
 			c := s.clients[connID]
 			c.explicitClose = true
-			fmt.Println("server close client:", connID)
-			// 某个client显示关闭的话 需要向readBuffer或者response channel写入err信息
+			//fmt.Println("server close client:", connID)
+			// 某个client显示关闭(非server.close())的话 需要向readBuffer或者response channel写入err信息
 			if s.readReq {
 				s.readReq = false
 				s.serverReadResponse <- NewData(connID, 0, 0, nil)
@@ -319,15 +314,12 @@ func (s *server) mainRoutine() {
 
 			for i := 1; i < s.nextConnID; i++ {
 				c, existed := s.clients[i]
-
 				if existed {
 					// 调用close()方法之后不会有read() 所以不需要向readBuffer写入信息
-
 					c.explicitClose = true
-					if c.sendBuffer.Len() == 0 {
+					if c.sendBuffer.Len() == 0 { // 可以删除client
 						delete(s.clients, i)
 					}
-
 				}
 			}
 		case <-s.serverMainRoutineExitChannel:
@@ -349,9 +341,7 @@ func (s *server) readRoutine() {
 
 			buffer = buffer[:n]
 
-			var message Message
-
-			json.Unmarshal(buffer, &message)
+			message := unmarshalMessage(buffer)
 
 			switch message.Type {
 			case MsgData:
@@ -372,7 +362,6 @@ func (s *server) readRoutine() {
 	}
 }
 
-// 由于server的read方法可能由上层调用，因为serverMessageChannel从mainRoutine剥离
 func (s *server) Read() (int, []byte, error) {
 	if s.closed {
 		return 0, nil, errors.New("server close")
@@ -380,7 +369,7 @@ func (s *server) Read() (int, []byte, error) {
 	s.serverReadRequest <- 0
 
 	dataMessage := <-s.serverReadResponse
-	// server的seqNum为0代表err信息
+	// server的seqNum为0代表err信息(connID需要作为err时的返回值)
 	if dataMessage.SeqNum == 0 {
 		return dataMessage.ConnID, nil, errors.New("read err")
 	} else {
@@ -392,11 +381,11 @@ func (s *server) Write(connID int, payload []byte) error {
 	c, ok := s.clients[connID]
 	if !ok || c.connLost {
 		return errors.New("conn does not exist or lost")
+	} else {
+		// 让mainRoutine写入seqNum 防止竞争条件
+		s.serverWriteMessageChannel <- NewData(connID, 0, len(payload), payload)
+		return nil
 	}
-
-	s.serverWriteMessageChannel <- NewData(connID, 0, len(payload), payload)
-
-	return nil
 }
 
 func (s *server) CloseConn(connID int) error {
@@ -416,6 +405,7 @@ func (s *server) Close() error {
 	res := <-s.serverCloseResonseChannel
 	//fmt.Println("server main ready to exit:", res)
 
+	// 同client的Close()，防止read routine在udpconn.read()处阻塞
 	s.udpConn.Close()
 	s.serverReadRoutineExitChannel <- 0
 	//fmt.Println("server read routine exit:", res)
