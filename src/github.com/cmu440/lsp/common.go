@@ -16,7 +16,7 @@ func unmarshalMessage(msg []byte) *Message {
 	var message Message
 	json.Unmarshal(msg, &message)
 
-	return message
+	return &message
 }
 
 func max(x, y int) int {

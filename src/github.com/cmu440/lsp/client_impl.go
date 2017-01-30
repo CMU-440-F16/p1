@@ -132,14 +132,14 @@ func (c *client) readRoutine() {
 						fmt.Println("plain message size", message.Size)
 					}
 					c.clientWriteMessageChannel <- NewAck(c.connId, message.SeqNum)
-					c.clientDataMessageChannel <- &message
+					c.clientDataMessageChannel <- message
 
 				case MsgAck:
 					//fmt.Println("client recv ack message:", message.String())
 					if c.debugMode {
 						fmt.Println("ack message received")
 					}
-					c.clientAckMessageChannel <- &message
+					c.clientAckMessageChannel <- message
 				}
 			}
 

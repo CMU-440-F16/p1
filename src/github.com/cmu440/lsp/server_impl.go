@@ -350,10 +350,10 @@ func (s *server) readRoutine() {
 					fmt.Println("server received data message: ", message)
 				}
 				s.serverWriteMessageChannel <- NewAck(message.ConnID, message.SeqNum)
-				s.serverDataMessageChannel <- &message
+				s.serverDataMessageChannel <- message
 			case MsgAck: // 修改对应client的seqNumber
 				//fmt.Println("server recv ack message:", message.String())
-				s.serverAckMessageChannel <- &message
+				s.serverAckMessageChannel <- message
 			case MsgConnect:
 				//fmt.Println("server recv conn message:", message.String())
 				s.serverConnMessageChannel <- addr
