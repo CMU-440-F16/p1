@@ -2,24 +2,33 @@ package lsp
 
 import (
 	"encoding/json"
+	"p1/src/github.com/cmu440/lspnet"
 )
 
 var MAX_MESSAGE_SIZE = 1000
 
-func marshalMessage(msg *Message) []byte {
+func MarshalMessage(msg *Message) []byte {
 	marshaledMsg, _ := json.Marshal(msg)
 
 	return marshaledMsg
 }
 
-func unmarshalMessage(msg []byte) *Message {
+func Send(conn *lspnet.UDPConn, msg *Message, addr *lspnet.UDPAddr) {
+	if addr != nil {
+		conn.WriteToUDP(MarshalMessage(msg), addr)
+	} else {
+		conn.Write(MarshalMessage(msg))
+	}
+}
+
+func UnmarshalMessage(msg []byte) *Message {
 	var message Message
 	json.Unmarshal(msg, &message)
 
 	return &message
 }
 
-func max(x, y int) int {
+func Max(x, y int) int {
 	if x >= y {
 		return x
 	} else {
@@ -27,7 +36,8 @@ func max(x, y int) int {
 	}
 }
 
-func dataMsgSizeVA(dataMsg *Message) bool {
+// payload过小则丢弃，过大则截断
+func DataMsgSizeVA(dataMsg *Message) bool {
 	if len(dataMsg.Payload) < dataMsg.Size {
 		return false
 	} else {
