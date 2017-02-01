@@ -5,11 +5,11 @@ package lsp
 import (
 	"p1/src/github.com/cmu440/lspnet"
 
+	"container/list"
 	"errors"
 	"fmt"
 	"strconv"
 	"time"
-	"container/list"
 )
 
 type client struct {
@@ -29,7 +29,7 @@ type client struct {
 	connLost              bool
 	explicitClose         bool
 
-	readBuffer *list.List
+	readBuffer    *list.List
 	receiveBuffer map[int]*Message // 缓存接收到，但是没有被上层read的数据(被上层读取后从buffer中移除)
 
 	clientDataMessageChannel  chan *Message
@@ -226,8 +226,8 @@ func (c *client) mainRoutine() {
 
 						c.clientReadResponse <- ackMessage
 
-					} else { // 没有则缓存
-						c.receiveBuffer[0] = ackMessage
+					} else { // 没有则缓存到list中
+						c.readBuffer.PushBack(ackMessage)
 					}
 
 				}
@@ -284,10 +284,10 @@ func (c *client) mainRoutine() {
 						fmt.Println(dataMessage.SeqNum, c.clientReadSeqNumber, c.readReq)
 					}
 
-					if c.readBuffer.Len() > 0 && c.readReq {
-						c.readReq = false
-						c.clientReadResponse <- c.readBuffer.Remove(c.readBuffer.Front()).(*Message)
-					}
+				}
+				if c.readBuffer.Len() > 0 && c.readReq {
+					c.readReq = false
+					c.clientReadResponse <- c.readBuffer.Remove(c.readBuffer.Front()).(*Message)
 				}
 			}
 
@@ -307,24 +307,6 @@ func (c *client) mainRoutine() {
 			} else {
 				c.readReq = true
 			}
-			//fmt.Println("client read data msg")
-/*			if !c.connLost {
-				msg, ok := c.receiveBuffer[c.clientReadSeqNumber]
-				if ok { // 已经有了则直接移除缓存并发送到response channel，更新下一个读取的data seqNumber
-					//fmt.Println("client read data msg existd:", msg.String())
-					delete(c.receiveBuffer, c.clientReadSeqNumber)
-					c.clientReadSeqNumber++
-					if c.debugMode {
-						fmt.Println("client read() seq:", c.clientReadSeqNumber)
-					}
-					c.clientReadResponse <- msg
-				} else { // 此时对应的消息还没有读取到，作标记，当对应的clientReadSeqNumber来的时候再更新
-					//fmt.Println("client read data msg doesn't existd, tag to true")
-					c.readReq = true
-				}
-			} else { // conn lost
-				c.getPendingMessageAfterLostOrExplicitClose()
-			}*/
 
 		case <-c.explicitCloseSetChannel:
 			c.explicitClose = true

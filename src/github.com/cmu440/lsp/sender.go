@@ -23,7 +23,7 @@ func NewSender(conn *lspnet.UDPConn, addr *lspnet.UDPAddr, sendSeq, wSize, wStar
 // client调用write发送消息
 func (sender *Sender) SendAndBufferMsg(writeMessage *Message, buffer bool) {
 	if writeMessage.Type == MsgAck {
-		sender.send(writeMessage)
+		Send(sender.udpConn, writeMessage, sender.addr)
 	} else { // dataMessage或者Connect需要暂存
 		writeMessage.SeqNum = sender.sendSeqNumber
 		sender.sendSeqNumber++
@@ -33,7 +33,7 @@ func (sender *Sender) SendAndBufferMsg(writeMessage *Message, buffer bool) {
 
 		// 如果在window的范围内则直接写
 		if writeMessage.SeqNum >= sender.windowStart && writeMessage.SeqNum <= sender.windowEnd {
-			sender.send(writeMessage)
+			Send(sender.udpConn, writeMessage, sender.addr)
 		}
 	}
 }
@@ -52,7 +52,7 @@ func (sender *Sender) SendWindowDataMsgInRange(iter *list.Element, start, end in
 		}
 
 		if dataMsg.SeqNum >= start && dataMsg.SeqNum <= end {
-			sender.send(dataMsg)
+			Send(sender.udpConn, dataMsg, sender.addr)
 		}
 
 	}
@@ -110,12 +110,4 @@ func (sender *Sender) getWindowStart() int {
 
 func (sender *Sender) getWindowEnd() int {
 	return sender.windowEnd
-}
-
-func (sender *Sender) send(msg *Message) {
-	if sender.addr != nil {
-		sender.udpConn.WriteToUDP(MarshalMessage(msg), sender.addr)
-	} else {
-		sender.udpConn.Write(MarshalMessage(msg))
-	}
 }

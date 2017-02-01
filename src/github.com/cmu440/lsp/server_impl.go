@@ -38,11 +38,11 @@ type server struct {
 	serverReadRequest  chan int      // client的read请求
 	serverReadResponse chan *Message // read请求的返回
 
-	serverCloseClientChannel chan int
-	serverClientCloseCheckChannel chan int
+	serverCloseClientChannel         chan int
+	serverClientCloseCheckChannel    chan int
 	serverClientCloseResponseChannel chan int
-	serverCloseChannel         chan int
-	serverCloseResponseChannel chan int // 标记server是否成功关闭
+	serverCloseChannel               chan int
+	serverCloseResponseChannel       chan int // 标记server是否成功关闭
 
 	serverReadRoutineExitChannel chan int
 	serverMainRoutineExitChannel chan int
@@ -147,7 +147,7 @@ func (s *server) mainRoutine() {
 						c.epochReceived = false
 					}
 					// 该client的connLost
-					if c.noMsgEpochs >= s.epochLimit {
+					if c.noMsgEpochs == s.epochLimit {
 
 						c.connLost = true
 						// 如果没有close, 则将pending data msg加入s.readBuffer
@@ -276,7 +276,7 @@ func (s *server) mainRoutine() {
 			} else {
 				s.readBuffer.PushBack(NewData(connID, 0, 0, nil))
 			}
-		case connID := <- s.serverClientCloseCheckChannel:
+		case connID := <-s.serverClientCloseCheckChannel:
 			_, exsited := s.clients[connID]
 			if exsited {
 				s.serverClientCloseResponseChannel <- 1
@@ -321,7 +321,7 @@ func (s *server) Read() (int, []byte, error) {
 
 func (s *server) Write(connID int, payload []byte) error {
 	s.serverClientCloseCheckChannel <- connID
-	existed := <- s.serverClientCloseResponseChannel
+	existed := <-s.serverClientCloseResponseChannel
 	if existed == 0 {
 		return errors.New("conn does not exist or lost")
 	} else {
@@ -333,7 +333,7 @@ func (s *server) Write(connID int, payload []byte) error {
 
 func (s *server) CloseConn(connID int) error {
 	s.serverClientCloseCheckChannel <- connID
-	existed := <- s.serverClientCloseResponseChannel
+	existed := <-s.serverClientCloseResponseChannel
 	if existed == 0 {
 		return errors.New("conn does not exist or lost")
 	}
