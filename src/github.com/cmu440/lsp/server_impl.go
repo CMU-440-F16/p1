@@ -51,18 +51,13 @@ type server struct {
 type clientProxy struct {
 	clientAddr *lspnet.UDPAddr
 	sender     *Sender
-
-	readSeqNumber int // 和msg read, ack write(epoch)有关 初始为1(server端的clientProxy只需要从1开始读dataMsg，下同), 代表下一个接受的消息的序号(小于该序号的dataMessage的丢弃)
-	serverReadSeq int // 下一个待加入server readBuffer的data seq 初始为1
+	receiver   *Receiver
 
 	mostRecentReceivedSeq int  // 最近收到的dataMsg的seqNumber
 	epochReceived         bool // 标记epoch是否收到了任何数据
 	noMsgEpochs           int
 	connLost              bool
 	explicitClose         bool
-
-	//sendBuffer    *list.List       // 缓存已经发送但是没有ack的数据或者是将要发送的数据(ack之后的消息从buffer中移除)
-	receiveBuffer map[int]*Message // 缓存接收到，但是没有被上层read的数据(被上层读取后从buffer中移除)
 }
 
 // NewServer creates, initiates, and returns a new server. This function should
@@ -150,17 +145,12 @@ func (s *server) mainRoutine() {
 					if c.noMsgEpochs == s.epochLimit {
 
 						c.connLost = true
+						if s.closed { // server在close的过程中如果有conn丢失则标记close有err
+							s.closedSuccess = false
+						}
 						// 如果没有close, 则将pending data msg加入s.readBuffer
 						if !c.explicitClose {
-							for size := len(c.receiveBuffer); size > 0; {
-								msg, ok := c.receiveBuffer[c.serverReadSeq]
-								if ok {
-									s.readBuffer.PushBack(msg)
-									delete(c.receiveBuffer, c.serverReadSeq)
-									size--
-								}
-								c.serverReadSeq++
-							}
+							c.receiver.movePendingMsgToReadBuffer(s.readBuffer)
 						}
 						// 无论connLost还是conn close 都要加入一个代表err的dataMsg
 						s.readBuffer.PushBack(NewData(i, -1, 0, nil))
@@ -172,10 +162,6 @@ func (s *server) mainRoutine() {
 
 						// 某个client的connLost之后 删除server端的client
 						delete(s.clients, i)
-
-						if s.closed { // server在close的过程中如果有conn丢失则标记close有err
-							s.closedSuccess = false
-						}
 					} else {
 						// 只有未close或者close之后的data没有全部ack的client才需要发送心跳(可能在全部消息都ack之后调用close时发生)
 						if !c.explicitClose || c.sender.getBufferSize() > 0 {
@@ -193,7 +179,7 @@ func (s *server) mainRoutine() {
 				if existed {
 					Send(s.udpConn, NewAck(connID, 0), udpAddr)
 				} else {
-					s.clients[s.nextConnID] = &clientProxy{udpAddr, NewSender(s.udpConn, udpAddr, 1, s.windowSize, 1), 1, 1, 0, false, 0, false, false, make(map[int]*Message)}
+					s.clients[s.nextConnID] = &clientProxy{udpAddr, NewSender(s.udpConn, udpAddr, 1, s.windowSize, 1), NewReceiver(1), 0, false, 0, false, false}
 					s.addrMap[udpAddr.String()] = s.nextConnID
 					// 由于不能routine内部的channel互相发送，此处的ack直接写(发送到serverWrite会死锁)
 					Send(s.udpConn, NewAck(s.nextConnID, 0), udpAddr)
@@ -206,6 +192,7 @@ func (s *server) mainRoutine() {
 				c.epochReceived = true
 				c.sender.UpdateSendBuffer(ackMessage.SeqNum)
 
+				// 一个client的
 				if c.explicitClose && c.sender.getBufferSize() == 0 {
 					//fmt.Println("client:", ackMessage.ConnID, "all msg ack, ready to exit")
 					delete(s.clients, ackMessage.ConnID)
@@ -219,35 +206,17 @@ func (s *server) mainRoutine() {
 			if s.debugMode {
 				fmt.Println("server read msg", dataMessage)
 			}
-			if !s.closed { // close之后不再调用read()方法 因此受到的dataMsg直接忽略
+			if !s.closed { // close之后不再调用read()方法 因此收到的dataMsg直接忽略
 				c, existed := s.clients[dataMessage.ConnID]
-				if existed && !c.connLost {
+				if existed && !c.connLost && !c.explicitClose {
 					c.epochReceived = true
 					// 更新readSeqNumber、receive buffer等信息
 					// 如果有readReq,则返回对应的信息 并更新readReq和clientReadNumber
 					c.mostRecentReceivedSeq = dataMessage.SeqNum
-					if _, ok := c.receiveBuffer[dataMessage.SeqNum]; dataMessage.SeqNum >= c.readSeqNumber && !ok { // 重复的信息(小于client期望接受的seqNumber或者buffer中已经含有)丢弃
-
-						c.receiveBuffer[dataMessage.SeqNum] = dataMessage
-						// 如果是下一个期望的dataMsg seqNumber 则将client中连续的seqNumber的message都放入server的读取缓存中,并更新readSeq
-						if dataMessage.SeqNum == c.readSeqNumber {
-							s.readBuffer.PushBack(dataMessage)
-							delete(c.receiveBuffer, c.readSeqNumber)
-							c.readSeqNumber++
-							c.serverReadSeq++
-							// 将readSeqNumber更新到下一个没有收到的dataMsg seqNum
-							for msg, ok := c.receiveBuffer[c.readSeqNumber]; ok; msg, ok = c.receiveBuffer[c.readSeqNumber] {
-								s.readBuffer.PushBack(msg)
-								delete(c.receiveBuffer, c.readSeqNumber)
-								c.readSeqNumber++
-								c.serverReadSeq++
-							}
-						}
-
-						if s.readBuffer.Len() > 0 && s.readReq {
-							s.readReq = false
-							s.serverReadResponse <- s.readBuffer.Remove(s.readBuffer.Front()).(*Message)
-						}
+					c.receiver.BufferRecvMsgAndUpDate(dataMessage, s.readBuffer)
+					if s.readBuffer.Len() > 0 && s.readReq {
+						s.readReq = false
+						s.serverReadResponse <- s.readBuffer.Remove(s.readBuffer.Front()).(*Message)
 					}
 				}
 			}
@@ -272,9 +241,9 @@ func (s *server) mainRoutine() {
 			// 某个client显示关闭(非server.close())的话 需要向readBuffer或者response channel写入err信息
 			if s.readReq {
 				s.readReq = false
-				s.serverReadResponse <- NewData(connID, 0, 0, nil)
+				s.serverReadResponse <- NewData(connID, -1, 0, nil)
 			} else {
-				s.readBuffer.PushBack(NewData(connID, 0, 0, nil))
+				s.readBuffer.PushBack(NewData(connID, -1, 0, nil))
 			}
 		case connID := <-s.serverClientCloseCheckChannel:
 			_, exsited := s.clients[connID]
