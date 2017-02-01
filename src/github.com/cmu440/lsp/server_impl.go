@@ -39,9 +39,10 @@ type server struct {
 	serverReadResponse chan *Message // read请求的返回
 
 	serverCloseClientChannel chan int
-
+	serverClientCloseCheckChannel chan int
+	serverClientCloseResponseChannel chan int
 	serverCloseChannel         chan int
-	serverCloseResponseChannel chan int
+	serverCloseResponseChannel chan int // 标记server是否成功关闭
 
 	serverReadRoutineExitChannel chan int
 	serverMainRoutineExitChannel chan int
@@ -50,14 +51,10 @@ type server struct {
 type clientProxy struct {
 	clientAddr *lspnet.UDPAddr
 	sender     *Sender
-	//sendSeqNumber int // 和ack read, msg write有关 初始为1 ，为每一个发送给client的包进行编号
+
 	readSeqNumber int // 和msg read, ack write(epoch)有关 初始为1(server端的clientProxy只需要从1开始读dataMsg，下同), 代表下一个接受的消息的序号(小于该序号的dataMessage的丢弃)
 	serverReadSeq int // 下一个待加入server readBuffer的data seq 初始为1
 
-	/*windowSize            int
-	windowStart           int // client发送包的起始编号（没有ack,由于没有conn, start从1开始）
-	windowEnd             int // client发送包的终止编号
-	maxACKReq             int*/
 	mostRecentReceivedSeq int  // 最近收到的dataMsg的seqNumber
 	epochReceived         bool // 标记epoch是否收到了任何数据
 	noMsgEpochs           int
@@ -86,7 +83,7 @@ func NewServer(port int, params *Params) (Server, error) {
 	}
 	server := &server{false, conn, make(map[int]*clientProxy), 1, make(map[string]int), params.EpochLimit, time.NewTicker(time.Millisecond * time.Duration(params.EpochMillis)), params.WindowSize,
 		false, false, true, list.New(), make(chan *Message), make(chan *lspnet.UDPAddr), make(chan *Message), make(chan *Message), make(chan int), make(chan *Message), make(chan int),
-		make(chan int), make(chan int), make(chan int), make(chan int)}
+		make(chan int), make(chan int), make(chan int), make(chan int), make(chan int), make(chan int)}
 	go server.readRoutine()
 	go server.mainRoutine()
 	//fmt.Println("server up")
@@ -166,7 +163,7 @@ func (s *server) mainRoutine() {
 							}
 						}
 						// 无论connLost还是conn close 都要加入一个代表err的dataMsg
-						s.readBuffer.PushBack(NewData(i, 0, 0, nil))
+						s.readBuffer.PushBack(NewData(i, -1, 0, nil))
 
 						if s.readReq {
 							s.readReq = false
@@ -175,6 +172,10 @@ func (s *server) mainRoutine() {
 
 						// 某个client的connLost之后 删除server端的client
 						delete(s.clients, i)
+
+						if s.closed { // server在close的过程中如果有conn丢失则标记close有err
+							s.closedSuccess = false
+						}
 					} else {
 						// 只有未close或者close之后的data没有全部ack的client才需要发送心跳(可能在全部消息都ack之后调用close时发生)
 						if !c.explicitClose || c.sender.getBufferSize() > 0 {
@@ -257,7 +258,6 @@ func (s *server) mainRoutine() {
 			// ack直接发送
 			if existed && !c.connLost {
 				c.sender.SendAndBufferMsg(writeMessage, true)
-
 			}
 		case <-s.serverReadRequest:
 			if s.readBuffer.Len() > 0 {
@@ -276,6 +276,13 @@ func (s *server) mainRoutine() {
 			} else {
 				s.readBuffer.PushBack(NewData(connID, 0, 0, nil))
 			}
+		case connID := <- s.serverClientCloseCheckChannel:
+			_, exsited := s.clients[connID]
+			if exsited {
+				s.serverClientCloseResponseChannel <- 1
+			} else {
+				s.serverClientCloseResponseChannel <- 0
+			}
 
 		case <-s.serverCloseChannel:
 			s.closed = true
@@ -283,13 +290,14 @@ func (s *server) mainRoutine() {
 			for i := 1; i < s.nextConnID; i++ {
 				c, existed := s.clients[i]
 				if existed {
-					// 调用close()方法之后不会有read() 所以不需要向readBuffer写入信息
+					// 调用close()方法之后不会有read() 所以不需要向s.readBuffer写入信息
 					c.explicitClose = true
 					if c.sender.getBufferSize() == 0 { // 可以删除client
 						delete(s.clients, i)
 					}
 				}
 			}
+
 		case <-s.serverMainRoutineExitChannel:
 			return
 		}
@@ -304,7 +312,7 @@ func (s *server) Read() (int, []byte, error) {
 
 	dataMessage := <-s.serverReadResponse
 	// server的seqNum为0代表err信息(connID需要作为err时的返回值)
-	if dataMessage.SeqNum == 0 {
+	if dataMessage.SeqNum == -1 {
 		return dataMessage.ConnID, nil, errors.New("read err")
 	} else {
 		return dataMessage.ConnID, dataMessage.Payload, nil
@@ -312,8 +320,9 @@ func (s *server) Read() (int, []byte, error) {
 }
 
 func (s *server) Write(connID int, payload []byte) error {
-	c, ok := s.clients[connID]
-	if !ok || c.connLost {
+	s.serverClientCloseCheckChannel <- connID
+	existed := <- s.serverClientCloseResponseChannel
+	if existed == 0 {
 		return errors.New("conn does not exist or lost")
 	} else {
 		// 让mainRoutine写入seqNum 防止竞争条件
@@ -323,8 +332,9 @@ func (s *server) Write(connID int, payload []byte) error {
 }
 
 func (s *server) CloseConn(connID int) error {
-	c, ok := s.clients[connID]
-	if !ok || c.connLost {
+	s.serverClientCloseCheckChannel <- connID
+	existed := <- s.serverClientCloseResponseChannel
+	if existed == 0 {
 		return errors.New("conn does not exist or lost")
 	}
 	s.serverCloseClientChannel <- connID
