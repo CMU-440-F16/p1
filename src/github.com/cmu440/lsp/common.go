@@ -13,14 +13,6 @@ func MarshalMessage(msg *Message) []byte {
 	return marshaledMsg
 }
 
-func Send(conn *lspnet.UDPConn, msg *Message, addr *lspnet.UDPAddr) {
-	if addr != nil {
-		conn.WriteToUDP(MarshalMessage(msg), addr)
-	} else {
-		conn.Write(MarshalMessage(msg))
-	}
-}
-
 func UnmarshalMessage(msg []byte) *Message {
 	var message Message
 	json.Unmarshal(msg, &message)
