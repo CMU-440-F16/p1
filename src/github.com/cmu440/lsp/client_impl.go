@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"strconv"
 	"time"
+	"container/list"
 )
 
 type client struct {
@@ -28,6 +29,7 @@ type client struct {
 	connLost              bool
 	explicitClose         bool
 
+	readBuffer *list.List
 	receiveBuffer map[int]*Message // 缓存接收到，但是没有被上层read的数据(被上层读取后从buffer中移除)
 
 	clientDataMessageChannel  chan *Message
@@ -65,7 +67,7 @@ func NewClient(hostport string, params *Params) (Client, error) {
 	}
 
 	client := client{false, 0, udpConn, NewSender(udpConn, nil, 0, params.WindowSize, 0), 0, 0, false, params.EpochLimit, time.NewTicker(time.Millisecond * time.Duration(params.EpochMillis)),
-		0, false, 0, false, false, make(map[int]*Message), make(chan *Message), make(chan *Message), make(chan *Message), make(chan int), make(chan *Message),
+		0, false, 0, false, false, list.New(), make(map[int]*Message), make(chan *Message), make(chan *Message), make(chan *Message), make(chan int), make(chan *Message),
 		make(chan int), make(chan int), make(chan int), make(chan int)}
 
 	if client.debugMode {
@@ -160,9 +162,23 @@ func (c *client) mainRoutine() {
 					c.epochTicker.Stop() // 当lost且close之后才Stop定时器
 					//fmt.Println("client with connLost after close, exit")
 					c.mainRoutineReadyExitChannel <- 0
-				} else if c.readReq { // 没有close, 但是connLost之前已经有read请求
-					c.readReq = false
-					c.getPendingMessageAfterLostOrExplicitClose()
+				} else {
+					for size := len(c.receiveBuffer); size > 0; {
+						msg, ok := c.receiveBuffer[c.clientReadSeqNumber]
+						if ok {
+							c.readBuffer.PushBack(msg)
+							delete(c.receiveBuffer, c.clientReadSeqNumber)
+							size--
+						}
+						c.clientReadSeqNumber++
+					}
+					// 表示连接已经断开
+					c.readBuffer.PushBack(NewData(0, -1, 0, nil))
+
+					if c.readReq { // 没有close, 但是connLost之前已经有read请求
+						c.readReq = false
+						c.clientReadResponse <- c.readBuffer.Remove(c.readBuffer.Front()).(*Message)
+					}
 				}
 
 			} else {
@@ -245,12 +261,18 @@ func (c *client) mainRoutine() {
 					//fmt.Println("client expected msg:" , c.readSeqNumber ,dataMessage.String())
 					// 缓存读取的消息
 					c.receiveBuffer[dataMessage.SeqNum] = dataMessage
-					// 如果是下一个期望的dataMsg seqNumber 则更新readSeqNumber到第一个未接受的
+					// 如果是下一个期望的dataMsg seqNumber 则将从连续的消息放入read()方法读取的缓存
 					if dataMessage.SeqNum == c.readSeqNumber {
+						c.readBuffer.PushBack(dataMessage)
+						delete(c.receiveBuffer, c.readSeqNumber)
+						c.clientReadSeqNumber++
 						c.readSeqNumber++
 						// 将readSeqNumber更新到下一个没有收到的dataMsg seqNum
-						for _, ok := c.receiveBuffer[c.readSeqNumber]; ok; _, ok = c.receiveBuffer[c.readSeqNumber] {
+						for msg, ok := c.receiveBuffer[c.readSeqNumber]; ok; msg, ok = c.receiveBuffer[c.readSeqNumber] {
+							c.readBuffer.PushBack(msg)
+							delete(c.receiveBuffer, c.readSeqNumber)
 							c.readSeqNumber++
+							c.clientReadSeqNumber++
 						}
 						if c.debugMode {
 							fmt.Println("after update, client read seq:", c.readSeqNumber)
@@ -261,17 +283,10 @@ func (c *client) mainRoutine() {
 					if c.debugMode {
 						fmt.Println(dataMessage.SeqNum, c.clientReadSeqNumber, c.readReq)
 					}
-					if dataMessage.SeqNum == c.clientReadSeqNumber && c.readReq {
+
+					if c.readBuffer.Len() > 0 && c.readReq {
 						c.readReq = false
-						delete(c.receiveBuffer, dataMessage.SeqNum)
-						c.clientReadSeqNumber++
-						if c.debugMode {
-							fmt.Println("client read() seq:", c.clientReadSeqNumber)
-						}
-						c.clientReadResponse <- dataMessage
-						if c.debugMode {
-							fmt.Println("read get its payload")
-						}
+						c.clientReadResponse <- c.readBuffer.Remove(c.readBuffer.Front()).(*Message)
 					}
 				}
 			}
@@ -287,8 +302,13 @@ func (c *client) mainRoutine() {
 			if c.debugMode {
 				fmt.Println("main routine client read req")
 			}
+			if c.readBuffer.Len() > 0 {
+				c.clientReadResponse <- c.readBuffer.Remove(c.readBuffer.Front()).(*Message)
+			} else {
+				c.readReq = true
+			}
 			//fmt.Println("client read data msg")
-			if !c.connLost {
+/*			if !c.connLost {
 				msg, ok := c.receiveBuffer[c.clientReadSeqNumber]
 				if ok { // 已经有了则直接移除缓存并发送到response channel，更新下一个读取的data seqNumber
 					//fmt.Println("client read data msg existd:", msg.String())
@@ -304,7 +324,7 @@ func (c *client) mainRoutine() {
 				}
 			} else { // conn lost
 				c.getPendingMessageAfterLostOrExplicitClose()
-			}
+			}*/
 
 		case <-c.explicitCloseSetChannel:
 			c.explicitClose = true
@@ -347,7 +367,7 @@ func (c *client) Read() ([]byte, error) {
 	c.clientReadRequest <- 0
 	dataMessage := <-c.clientReadResponse
 	//fmt.Println(dataMessage)
-	if dataMessage.ConnID == 0 { // 代表connLost或者explicit Close且没有别的消息了
+	if dataMessage.SeqNum < 0 { // 代表connLost或者explicit Close且没有别的消息了
 		return nil, errors.New("conn lost or explicit close: read")
 	} else {
 		/*fmt.Println("msg return:", dataMessage.String())
