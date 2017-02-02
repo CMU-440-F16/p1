@@ -45,3 +45,8 @@ func DataMsgSizeVA(dataMsg *Message) bool {
 		return true
 	}
 }
+
+// 用seq为负值代表errMsg, 如client close或者conn Lost等
+func NewErrMsg(connID int) *Message{
+	return &Message{MsgData, connID, -1, 0, nil}
+}
