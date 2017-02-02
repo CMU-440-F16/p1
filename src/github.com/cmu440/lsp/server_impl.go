@@ -9,7 +9,6 @@ import (
 
 	"strconv"
 
-	"container/list"
 	"fmt"
 	"time"
 )
@@ -20,15 +19,13 @@ type server struct {
 	clients    map[int]*clientProxy // connID - client map
 	nextConnID int
 	addrMap    map[string]int // 判断重复的conn消息 使用addr(ip + port)区别，用于处理重复的conn消息
+	reader  *Reader
 
 	epochLimit    int
 	epochTicker   *time.Ticker
 	windowSize    int
-	readReq       bool
 	closed        bool
 	closedSuccess bool
-
-	readBuffer *list.List
 
 	serverDataMessageChannel  chan *Message        // 用于read方法
 	serverConnMessageChannel  chan *lspnet.UDPAddr // 由于conn消息都是(conn,0,0)，此处采用发送UDPAddr区分
@@ -76,9 +73,10 @@ func NewServer(port int, params *Params) (Server, error) {
 	if err != nil {
 		return nil, err
 	}
-	server := &server{false, conn, make(map[int]*clientProxy), 1, make(map[string]int), params.EpochLimit, time.NewTicker(time.Millisecond * time.Duration(params.EpochMillis)), params.WindowSize,
-		false, false, true, list.New(), make(chan *Message), make(chan *lspnet.UDPAddr), make(chan *Message), make(chan *Message), make(chan int), make(chan *Message), make(chan int),
+	server := &server{false, conn, make(map[int]*clientProxy), 1, make(map[string]int), nil, params.EpochLimit, time.NewTicker(time.Millisecond * time.Duration(params.EpochMillis)), params.WindowSize,
+		false, true, make(chan *Message), make(chan *lspnet.UDPAddr), make(chan *Message), make(chan *Message), make(chan int), make(chan *Message), make(chan int),
 		make(chan int), make(chan int), make(chan int), make(chan int), make(chan int), make(chan int)}
+	server.reader = NewReader(server.serverReadResponse)
 	go server.readRoutine()
 	go server.mainRoutine()
 	//fmt.Println("server up")
@@ -150,15 +148,11 @@ func (s *server) mainRoutine() {
 						}
 						// 如果没有close, 则将pending data msg加入s.readBuffer
 						if !c.explicitClose {
-							c.receiver.movePendingMsgToReadBuffer(s.readBuffer)
+							c.receiver.movePendingMsgToReader(s.reader)
 						}
 						// 无论connLost还是conn close 都要加入一个代表err的dataMsg
-						s.readBuffer.PushBack(NewData(i, -1, 0, nil))
+						s.reader.OfferMsgWithReqCheck(NewErrMsg(i))
 
-						if s.readReq {
-							s.readReq = false
-							s.serverReadResponse <- s.readBuffer.Remove(s.readBuffer.Front()).(*Message)
-						}
 
 						// 某个client的connLost之后 删除server端的client
 						delete(s.clients, i)
@@ -213,11 +207,8 @@ func (s *server) mainRoutine() {
 					// 更新readSeqNumber、receive buffer等信息
 					// 如果有readReq,则返回对应的信息 并更新readReq和clientReadNumber
 					c.mostRecentReceivedSeq = dataMessage.SeqNum
-					c.receiver.BufferRecvMsgAndUpDate(dataMessage, s.readBuffer)
-					if s.readBuffer.Len() > 0 && s.readReq {
-						s.readReq = false
-						s.serverReadResponse <- s.readBuffer.Remove(s.readBuffer.Front()).(*Message)
-					}
+					c.receiver.BufferRecvMsgAndUpDate(dataMessage, s.reader)
+
 				}
 			}
 
@@ -229,22 +220,16 @@ func (s *server) mainRoutine() {
 				c.sender.SendAndBufferMsg(writeMessage, true)
 			}
 		case <-s.serverReadRequest:
-			if s.readBuffer.Len() > 0 {
-				s.serverReadResponse <- s.readBuffer.Remove(s.readBuffer.Front()).(*Message)
-			} else {
-				s.readReq = true
-			}
+			s.reader.GetNextMessageToChannelOrSetReq()
+
 		case connID := <-s.serverCloseClientChannel:
 			c := s.clients[connID]
 			c.explicitClose = true
 			//fmt.Println("server close client:", connID)
 			// 某个client显示关闭(非server.close())的话 需要向readBuffer或者response channel写入err信息
-			if s.readReq {
-				s.readReq = false
-				s.serverReadResponse <- NewData(connID, -1, 0, nil)
-			} else {
-				s.readBuffer.PushBack(NewData(connID, -1, 0, nil))
-			}
+
+			s.reader.OfferMsgWithReqCheck(NewErrMsg(connID))
+
 		case connID := <-s.serverClientCloseCheckChannel:
 			_, exsited := s.clients[connID]
 			if exsited {

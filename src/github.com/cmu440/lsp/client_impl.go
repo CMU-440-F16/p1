@@ -5,7 +5,6 @@ package lsp
 import (
 	"p1/src/github.com/cmu440/lspnet"
 
-	"container/list"
 	"errors"
 	"fmt"
 	"strconv"
@@ -18,7 +17,7 @@ type client struct {
 	udpConn   *lspnet.UDPConn
 	sender    *Sender
 	receiver  *Receiver
-	readReq   bool // 有请求且readBuffer不空时返回，否则设置为true, 直到readBuffer有对应的数据
+	reader    *Reader
 
 	epochLimit            int
 	epochTicker           *time.Ticker
@@ -28,7 +27,6 @@ type client struct {
 	connLost              bool
 	explicitClose         bool
 
-	readBuffer *list.List // 由receiver操控的有序data数据，供read(）读取
 
 	clientDataMessageChannel  chan *Message
 	clientAckMessageChannel   chan *Message
@@ -64,9 +62,10 @@ func NewClient(hostport string, params *Params) (Client, error) {
 		return nil, err
 	}
 
-	client := client{false, 0, udpConn, NewSender(udpConn, nil, 0, params.WindowSize, 0), NewReceiver(0), false, params.EpochLimit, time.NewTicker(time.Millisecond * time.Duration(params.EpochMillis)),
-		0, false, 0, false, false, list.New(), make(chan *Message), make(chan *Message), make(chan *Message), make(chan int), make(chan *Message),
+	client := client{false, 0, udpConn, NewSender(udpConn, nil, 0, params.WindowSize, 0), NewReceiver(0),  nil,params.EpochLimit, time.NewTicker(time.Millisecond * time.Duration(params.EpochMillis)),
+		0, false, 0, false, false, make(chan *Message), make(chan *Message), make(chan *Message), make(chan int), make(chan *Message),
 		make(chan int), make(chan int), make(chan int), make(chan int)}
+	client.reader = NewReader(client.clientReadResponse)
 
 	if client.debugMode {
 		fmt.Println("real udp conn ok")
@@ -158,14 +157,9 @@ func (c *client) mainRoutine() {
 					c.mainRoutineReadyExitChannel <- 0
 				} else {
 
-					c.receiver.movePendingMsgToReadBuffer(c.readBuffer)
+					c.receiver.movePendingMsgToReader(c.reader)
 					// 表示连接已经断开的消息
-					c.readBuffer.PushBack(NewData(0, -1, 0, nil))
-
-					if c.readReq { // 没有close, 但是connLost之前已经有read请求
-						c.readReq = false
-						c.clientReadResponse <- c.readBuffer.Remove(c.readBuffer.Front()).(*Message)
-					}
+					c.reader.OfferMsgWithReqCheck(NewErrMsg(0))
 				}
 
 			} else {
@@ -201,12 +195,8 @@ func (c *client) mainRoutine() {
 				if ackMessage.SeqNum == 0 && c.connId == 0 {
 					// seqNumber为0的ack含有connId，需要缓存，为了和dataMsg一起处理，此处将payload设置为connId的byte数组
 					ackMessage.Payload = []byte(strconv.Itoa(ackMessage.ConnID))
-					c.receiver.BufferRecvMsgAndUpDate(ackMessage, c.readBuffer)
+					c.receiver.BufferRecvMsgAndUpDate(ackMessage, c.reader)
 					// client尝试了read()，则返回并更新
-					if c.readReq {
-						c.readReq = false
-						c.clientReadResponse <- c.readBuffer.Remove(c.readBuffer.Front()).(*Message)
-					}
 				}
 
 				if c.explicitClose && c.sender.getBufferSize() == 0 {
@@ -231,11 +221,8 @@ func (c *client) mainRoutine() {
 				// 如果有readReq,则返回对应的信息 并更新readReq和clientReadNumber
 				c.mostRecentReceivedSeq = dataMessage.SeqNum
 
-				c.receiver.BufferRecvMsgAndUpDate(dataMessage, c.readBuffer)
-				if c.readBuffer.Len() > 0 && c.readReq {
-					c.readReq = false
-					c.clientReadResponse <- c.readBuffer.Remove(c.readBuffer.Front()).(*Message)
-				}
+				c.receiver.BufferRecvMsgAndUpDate(dataMessage, c.reader)
+
 			}
 
 		case writeMessage := <-c.clientWriteMessageChannel:
@@ -249,11 +236,8 @@ func (c *client) mainRoutine() {
 			if c.debugMode {
 				fmt.Println("main routine client read req")
 			}
-			if c.readBuffer.Len() > 0 {
-				c.clientReadResponse <- c.readBuffer.Remove(c.readBuffer.Front()).(*Message)
-			} else {
-				c.readReq = true
-			}
+
+			c.reader.GetNextMessageToChannelOrSetReq()
 
 		case <-c.explicitCloseSetChannel:
 			c.explicitClose = true
