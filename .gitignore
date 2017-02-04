@@ -28,3 +28,7 @@ _testmain.go
 
 # For Macs
 .DS_Store
+
+# idea project file
+*.iml
+.idea/

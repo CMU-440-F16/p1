@@ -4,8 +4,9 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
-	"github.com/cmu440/lspnet"
+
 	"math/rand"
+	"p1/src/github.com/cmu440/lspnet"
 	"testing"
 	"time"
 )

@@ -3,9 +3,9 @@ package main
 import (
 	"fmt"
 	"os"
+	"p1/src/github.com/cmu440/bitcoin"
+	"p1/src/github.com/cmu440/lsp"
 	"strconv"
-
-	"github.com/cmu440/lsp"
 )
 
 func main() {
@@ -30,11 +30,19 @@ func main() {
 
 	defer client.Close()
 
-	_ = message  // Keep compiler happy. Please remove!
-	_ = maxNonce // Keep compiler happy. Please remove!
-	// TODO: implement this!
+	requestMessage := bitcoin.MarshalMessage(bitcoin.NewRequest(message, 0, maxNonce))
 
-	printResult(0, 0)
+	client.Write(requestMessage)
+
+	result, err := client.Read()
+
+	if err != nil { // nil的情况只有可能是连接丢失
+		printDisconnected()
+	} else {
+		printRes := bitcoin.UnmarshalMessage(result)
+		printResult(printRes.Hash, printRes.Nonce)
+	}
+
 }
 
 // printResult prints the final result to stdout.
