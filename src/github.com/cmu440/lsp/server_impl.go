@@ -19,7 +19,7 @@ type server struct {
 	clients    map[int]*clientProxy // connID - client map
 	nextConnID int
 	addrMap    map[string]int // 判断重复的conn消息 使用addr(ip + port)区别，用于处理重复的conn消息
-	reader  *Reader
+	reader     *Reader
 
 	epochLimit    int
 	epochTicker   *time.Ticker
@@ -152,7 +152,6 @@ func (s *server) mainRoutine() {
 						}
 						// 无论connLost还是conn close 都要加入一个代表err的dataMsg
 						s.reader.OfferMsgWithReqCheck(NewErrMsg(i))
-
 
 						// 某个client的connLost之后 删除server端的client
 						delete(s.clients, i)

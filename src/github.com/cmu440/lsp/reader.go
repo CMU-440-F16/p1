@@ -3,12 +3,12 @@ package lsp
 import "container/list"
 
 type Reader struct {
-	readBuffer *list.List // 由receiver操控的有序data数据，供read(）读取
-	readReq bool
+	readBuffer          *list.List // 由receiver操控的有序data数据，供read(）读取
+	readReq             bool
 	readResponseChannel chan *Message
 }
 
-func NewReader (responseChannel chan *Message) *Reader{
+func NewReader(responseChannel chan *Message) *Reader {
 	return &Reader{list.New(), false, responseChannel}
 }
 
@@ -21,7 +21,7 @@ func (reader *Reader) OfferMsgWithReqCheck(message *Message) {
 	}
 }
 
-func (reader *Reader) GetNextMessageToChannelOrSetReq()  {
+func (reader *Reader) GetNextMessageToChannelOrSetReq() {
 	if reader.readBuffer.Len() > 0 {
 		reader.readResponseChannel <- reader.poll()
 	} else {
@@ -29,7 +29,7 @@ func (reader *Reader) GetNextMessageToChannelOrSetReq()  {
 	}
 }
 
-func (reader *Reader) poll() *Message{
+func (reader *Reader) poll() *Message {
 	return reader.readBuffer.Remove(reader.readBuffer.Front()).(*Message)
 }
 

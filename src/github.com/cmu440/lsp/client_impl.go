@@ -27,7 +27,6 @@ type client struct {
 	connLost              bool
 	explicitClose         bool
 
-
 	clientDataMessageChannel  chan *Message
 	clientAckMessageChannel   chan *Message
 	clientWriteMessageChannel chan *Message // 如果同时write和read都修改sequence Number的话会出现race condition
@@ -62,7 +61,7 @@ func NewClient(hostport string, params *Params) (Client, error) {
 		return nil, err
 	}
 
-	client := client{false, 0, udpConn, NewSender(udpConn, nil, 0, params.WindowSize, 0), NewReceiver(0),  nil,params.EpochLimit, time.NewTicker(time.Millisecond * time.Duration(params.EpochMillis)),
+	client := client{false, 0, udpConn, NewSender(udpConn, nil, 0, params.WindowSize, 0), NewReceiver(0), nil, params.EpochLimit, time.NewTicker(time.Millisecond * time.Duration(params.EpochMillis)),
 		0, false, 0, false, false, make(chan *Message), make(chan *Message), make(chan *Message), make(chan int), make(chan *Message),
 		make(chan int), make(chan int), make(chan int), make(chan int)}
 	client.reader = NewReader(client.clientReadResponse)
